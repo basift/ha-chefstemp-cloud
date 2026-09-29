@@ -1,9 +1,20 @@
 """Tests for identifying temperature sensors for the per-entry unit override."""
 
-from custom_components.chefstemp.temperature_units import (
-    is_temperature_sensor,
-    temperature_entity_platform,
+import importlib.util
+from pathlib import Path
+
+_MODULE_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "custom_components"
+    / "chefstemp"
+    / "temperature_units.py"
 )
+_SPEC = importlib.util.spec_from_file_location("chefstemp_temperature_units", _MODULE_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+_MODULE = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_MODULE)
+is_temperature_sensor = _MODULE.is_temperature_sensor
+temperature_entity_platform = _MODULE.temperature_entity_platform
 
 
 def test_temperature_sensor_unique_ids_are_selected() -> None:
