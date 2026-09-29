@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import EntityCategory, UnitOfTemperature
 from homeassistant.core import HomeAssistant
@@ -13,6 +11,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 
 from .coordinator import ChefsTempConfigEntry
 from .entity import ChefsTempEntity
+from .temperature_units import temperature_entity_platform
 
 
 async def async_setup_entry(
@@ -73,24 +72,8 @@ class ChefsTempTemperatureUnitSwitch(ChefsTempEntity, SwitchEntity, RestoreEntit
         self.coordinator.temperature_unit_override = unit
         registry = er.async_get(self.hass)
         for entity in er.async_entries_for_config_entry(registry, self._entry.entry_id):
-            platform = _temperature_entity_platform(entity.domain, entity.unique_id)
+            platform = temperature_entity_platform(entity.domain, entity.unique_id)
             if platform is not None:
                 registry.async_update_entity_options(
                     entity.entity_id, platform, {"unit_of_measurement": unit}
                 )
-
-
-def _is_temperature_sensor(unique_id: str) -> bool:
-    """Recognize the grill ambient sensor and dynamically created probe temperatures."""
-    return re.search(r"(?:^|_)(?:ambient|probe\d+_temperature)$", unique_id) is not None
-
-
-def _temperature_entity_platform(domain: str, unique_id: str) -> str | None:
-    """Return the options namespace for a temperature sensor or setpoint entity."""
-    if domain == "sensor" and _is_temperature_sensor(unique_id):
-        return "sensor"
-    if domain == "number" and re.search(
-        r"(?:^|_)(?:fan_target|alarm_high|alarm_low)$", unique_id
-    ):
-        return "number"
-    return None
