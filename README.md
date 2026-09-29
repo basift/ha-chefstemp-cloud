@@ -92,4 +92,3 @@ travel in the clear to the vendor. Do not publish your device's MAC address.
 
 Protocol reverse-engineered from the official app and confirmed on real hardware.
 See the sanitized [protocol notes](docs/PROTOCOL.md) for frame and security details.
-Structure follows [ha-deako-cloud](https://github.com/basift/ha-deako-cloud).
