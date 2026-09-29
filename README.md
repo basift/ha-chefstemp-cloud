@@ -1,5 +1,9 @@
 # ChefsTemp for Home Assistant (unofficial)
 
+[![Release](https://img.shields.io/github/v/release/basift/ha-chefstemp-cloud?display_name=tag&sort=semver)](https://github.com/basift/ha-chefstemp-cloud/releases)
+[![Validate](https://github.com/basift/ha-chefstemp-cloud/actions/workflows/validate.yml/badge.svg)](https://github.com/basift/ha-chefstemp-cloud/actions/workflows/validate.yml)
+[![Open in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=basift&repository=ha-chefstemp-cloud&category=integration)
+
 Control and monitor a **ChefsTemp** BBQ system — the S1 "Stand" WiFi hub, its
 temperature probes and the Breezo fan — from Home Assistant. This is an
 independent, unofficial integration; it is not affiliated with ChefsTemp/Emax.
@@ -58,6 +62,8 @@ thermostat enable, not actual motor speed or physical fan activity. Do not run
 both against the same fan unless you intend their actions to interact.
 
 ## Installation
+
+Use the **Open in HACS** button above, or add the repository manually:
 
 1. In HACS → *Custom repositories*, add `https://github.com/basift/ha-chefstemp-cloud`
    as an **Integration**.
