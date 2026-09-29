@@ -14,7 +14,7 @@ from .coordinator import ChefsTempConfigEntry, ChefsTempCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.FAN, Platform.NUMBER, Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.FAN, Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ChefsTempConfigEntry) -> bool:

@@ -73,6 +73,7 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.device_mac = entry.data[CONF_DEVICE_MAC]
         self.device_name = entry.title
         self.push_connected = False
+        self.temperature_unit_override: str | None = None
 
         # Fan setpoint state HA owns and rebuilds full op20 frames from.
         self.fan_target = DEFAULT_FAN_TARGET

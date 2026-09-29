@@ -32,7 +32,7 @@ def _load_setup(monkeypatch):
         return module
 
     stub("homeassistant", __path__=[])
-    stub("homeassistant.const", CONF_EMAIL="email", CONF_PASSWORD="password", Platform=SimpleNamespace(FAN="fan", NUMBER="number", SENSOR="sensor"))
+    stub("homeassistant.const", CONF_EMAIL="email", CONF_PASSWORD="password", Platform=SimpleNamespace(FAN="fan", NUMBER="number", SENSOR="sensor", SWITCH="switch"))
     stub("homeassistant.core", HomeAssistant=object)
     stub("homeassistant.exceptions", ConfigEntryAuthFailed=ConfigEntryAuthFailed, ConfigEntryNotReady=ConfigEntryNotReady)
     stub("homeassistant.helpers", __path__=[])
@@ -89,6 +89,7 @@ def test_setup_cleans_partial_start_and_retries_broker(monkeypatch, stage):
     else:
         assert asyncio.run(module.async_setup_entry(hass, entry)) is True
     assert coordinator.instances[-1].shutdowns == (0 if stage == "success" else 1)
+    assert module.PLATFORMS == ["fan", "number", "sensor", "switch"]
 
 
 @pytest.mark.parametrize("error_kind", ["auth", "other"])

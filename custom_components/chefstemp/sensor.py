@@ -19,6 +19,7 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import ChefsTempConfigEntry, ChefsTempCoordinator
@@ -130,6 +131,19 @@ class ChefsTempSensor(ChefsTempEntity, SensorEntity):
         """Initialise the sensor from its description."""
         super().__init__(coordinator, description.key)
         self.entity_description = description
+
+    async def async_added_to_hass(self) -> None:
+        """Apply the selected Celsius override to probes discovered after startup."""
+        await super().async_added_to_hass()
+        unit = self.coordinator.temperature_unit_override
+        if (
+            unit is not None
+            and self.entity_description.native_unit_of_measurement
+            == UnitOfTemperature.CELSIUS
+        ):
+            er.async_get(self.hass).async_update_entity_options(
+                self.entity_id, "sensor", {"unit_of_measurement": unit}
+            )
 
     @property
     def native_value(self) -> Any:

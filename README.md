@@ -26,6 +26,7 @@ Per stand (one Home Assistant device):
 | Probe N temperature | sensor | meat probe (°C), one set per connected probe |
 | Probe N battery | sensor | % (diagnostic) |
 | Probe N signal | sensor | dBm (diagnostic, disabled by default) |
+| Show temperature in °C | switch | on forces °C for this stand's temperature sensors and controls; off follows HA's unit system |
 | Fan | fan | on/off — see below |
 | Fan target | number | the fan's setpoint (°C) |
 | Grill high alarm | number | ambient high-alarm setpoint (°C) |
@@ -56,7 +57,8 @@ The repository includes two optional [Home Assistant automation blueprints](blue
 - [Temperature-band hysteresis](blueprints/automation/chefstemp/temperature_band_hysteresis.yaml) enables the thermostat below a lower probe-temperature threshold and disables it above an upper threshold.
 
 Import the desired blueprint into Home Assistant, then select your grill/probe
-temperature sensor and ChefsTemp fan. The sensors must report in °C; invalid or
+temperature sensor and ChefsTemp fan. Turn on **Show temperature in °C** when
+using these blueprints, which expect sensor readings in °C; invalid or
 out-of-range readings (outside 0–500 °C) are ignored. These blueprints control
 thermostat enable, not actual motor speed or physical fan activity. Do not run
 both against the same fan unless you intend their actions to interact.

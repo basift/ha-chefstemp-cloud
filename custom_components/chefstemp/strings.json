@@ -47,6 +47,9 @@
     "fan": {
       "fan": { "name": "Fan" }
     },
+    "switch": {
+      "temperature_celsius": { "name": "Show temperature in °C" }
+    },
     "number": {
       "fan_target": { "name": "Fan target" },
       "alarm_high": { "name": "Grill high alarm" },
