@@ -1,0 +1,56 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Sign in to ChefsTemp",
+        "description": "Use your ChefsTemp account email and password. Communication with the vendor cloud is unencrypted (plain HTTP/MQTT); see the README.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "device": {
+        "title": "Choose a stand",
+        "data": {
+          "device_mac": "Stand"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in to ChefsTemp again",
+        "description": "ChefsTemp no longer accepts the stored credentials for {account}.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Wrong email or password.",
+      "cannot_connect": "Could not reach ChefsTemp.",
+      "no_devices": "This account has no ChefsTemp stands.",
+      "wrong_account": "That account does not have access to this stand.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "This stand is already set up.",
+      "reauth_successful": "Signed in again."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "ambient": { "name": "Grill temperature" },
+      "stand_battery": { "name": "Stand battery" },
+      "probe_temperature": { "name": "Probe {idx} temperature" },
+      "probe_battery": { "name": "Probe {idx} battery" },
+      "probe_signal": { "name": "Probe {idx} signal" }
+    },
+    "fan": {
+      "fan": { "name": "Fan" }
+    },
+    "number": {
+      "fan_target": { "name": "Fan target" },
+      "alarm_high": { "name": "Grill high alarm" },
+      "alarm_low": { "name": "Grill low alarm" }
+    }
+  }
+}

@@ -1,0 +1,88 @@
+blueprint:
+  name: ChefsTemp - Temperature-band fan control (hysteresis)
+  description: >-
+    Enable the ChefsTemp fan thermostat when the selected probe temperature falls
+    below the lower limit; disable it when temperature rises above the upper
+    limit. Between limits the current fan state is retained. Readings outside
+    0–500 °C are ignored. This controls the thermostat enable, not the
+    device-selected fan speed.
+  domain: automation
+  input:
+    temperature_sensor:
+      name: Probe temperature sensor
+      selector:
+        entity:
+          filter:
+            domain: sensor
+            device_class: temperature
+    fan_entity:
+      name: ChefsTemp fan
+      selector:
+        entity:
+          filter:
+            domain: fan
+    lower_limit:
+      name: Lower temperature limit
+      description: Turn the fan thermostat on below this temperature (°C).
+      default: 90
+      selector:
+        number:
+          min: 0
+          max: 500
+          step: 1
+          unit_of_measurement: °C
+          mode: box
+    upper_limit:
+      name: Upper temperature limit
+      description: Turn the fan thermostat off above this temperature (°C).
+      default: 110
+      selector:
+        number:
+          min: 0
+          max: 500
+          step: 1
+          unit_of_measurement: °C
+          mode: box
+
+mode: single
+
+triggers:
+  - trigger: state
+    entity_id: !input temperature_sensor
+  - trigger: homeassistant
+    event: start
+
+variables:
+  temperature_sensor: !input temperature_sensor
+  fan_entity: !input fan_entity
+  lower_limit: !input lower_limit
+  upper_limit: !input upper_limit
+
+actions:
+  - condition: template
+    value_template: >-
+      {{ state_attr(temperature_sensor, 'unit_of_measurement') == '°C' and
+         is_number(states(temperature_sensor)) and
+         0 <= (states(temperature_sensor) | float) <= 500 and
+         0 <= (lower_limit | float) <= 500 and
+         0 <= (upper_limit | float) <= 500 and
+         (lower_limit | float) < (upper_limit | float) }}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ states(temperature_sensor) | float < lower_limit | float
+                 and is_state(fan_entity, 'off') }}
+        sequence:
+          - action: fan.turn_on
+            target:
+              entity_id: !input fan_entity
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ states(temperature_sensor) | float > upper_limit | float
+                 and is_state(fan_entity, 'on') }}
+        sequence:
+          - action: fan.turn_off
+            target:
+              entity_id: !input fan_entity

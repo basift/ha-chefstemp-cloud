@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.DS_Store
+.idea/
+.vscode/
+
+# Never commit captured traffic, credentials or the device MAC.
+*.pcap
+*.pcapng
+*.flows
+*.log
+capture/
+apk/
+secrets.json

@@ -1,0 +1,86 @@
+blueprint:
+  name: ChefsTemp - Lid-open fan cooldown
+  description: >-
+    Force the ChefsTemp thermostat off after a rapid grill-temperature drop, then
+    restore it after a cooldown only if it was on beforehand and no one turned it
+    back on during the cooldown. Temperatures outside 0–500 °C are ignored.
+    Select an ambient grill sensor and ChefsTemp fan.
+  domain: automation
+  input:
+    temperature_sensor:
+      name: Grill temperature sensor
+      selector:
+        entity:
+          filter:
+            domain: sensor
+            device_class: temperature
+    fan_entity:
+      name: ChefsTemp fan
+      selector:
+        entity:
+          filter:
+            domain: fan
+    drop_threshold:
+      name: Temperature drop to detect
+      description: Minimum drop between consecutive sensor readings, in °C.
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: °C
+          mode: box
+    cooldown:
+      name: Fan-off cooldown
+      default:
+        minutes: 5
+      selector:
+        duration: {}
+
+mode: single
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input temperature_sensor
+
+conditions:
+  - condition: template
+    value_template: >-
+     {{ trigger.from_state is not none and trigger.to_state is not none
+         and trigger.from_state.attributes.get('unit_of_measurement') == '°C'
+         and trigger.to_state.attributes.get('unit_of_measurement') == '°C'
+         and is_number(trigger.from_state.state) and is_number(trigger.to_state.state)
+         and 0 <= (trigger.from_state.state | float) <= 500
+         and 0 <= (trigger.to_state.state | float) <= 500
+         and (trigger.from_state.state | float - trigger.to_state.state | float)
+             >= (drop_threshold | float) }}
+
+variables:
+  drop_threshold: !input drop_threshold
+  fan_entity: !input fan_entity
+
+actions:
+  - variables:
+      fan_was_on: "{{ is_state(fan_entity, 'on') }}"
+  - if:
+      - condition: template
+        value_template: "{{ fan_was_on }}"
+    then:
+      - action: fan.turn_off
+        target:
+          entity_id: !input fan_entity
+  - wait_for_trigger:
+      - trigger: state
+        entity_id: !input fan_entity
+        to: "on"
+    timeout: !input cooldown
+    continue_on_timeout: true
+  - if:
+      - condition: template
+        value_template: "{{ fan_was_on and not wait.completed and is_state(fan_entity, 'off') }}"
+    then:
+      - action: fan.turn_on
+        target:
+          entity_id: !input fan_entity
