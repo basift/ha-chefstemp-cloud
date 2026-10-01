@@ -72,6 +72,70 @@ def test_decode_real_frames(hex_frame: str, expected: dict) -> None:
     assert frames.parse(bytes.fromhex(hex_frame)) == [expected]
 
 
+@pytest.mark.parametrize("length", range(14))
+def test_parse_rejects_truncated_probe_frame(length: int) -> None:
+    frame = frames.build(0x20, b"\x00\x32\x02\x58\x3c\xaf", header=b"\x57\xa2\x06")
+    assert len(frame) == 14
+    assert not frames.verify(frame[:length])
+    assert frames.parse(frame[:length]) == []
+
+
+@pytest.mark.parametrize("offset", range(14))
+def test_parse_rejects_each_single_byte_probe_mutation(offset: int) -> None:
+    frame = frames.build(0x20, b"\x00\x32\x00\xc8\x3c\xaf", header=b"\x57\xa2\x06")
+    corrupt = frame[:offset] + bytes((frame[offset] ^ 1,)) + frame[offset + 1:]
+    assert frames.parse(frame) == [
+        {"type": "probe", "idx": 0, "celsius": 20.0, "battery": 60, "rssi": -81}
+    ]
+    assert not frames.verify(corrupt)
+    assert frames.parse(corrupt) == []
+
+
+def test_parse_rejects_bad_checksum_without_losing_next_frame() -> None:
+    first = frames.build(0x20, b"\x00\x32\x00\x78\x3c\xaf", header=b"\x57\xa2\x06")
+    valid = frames.build(0x20, b"\x01\x32\x02\x58\x50\xb0", header=b"\x57\xa2\x06")
+    corrupt = first[:-1] + bytes((first[-1] ^ 1,))
+    assert not frames.verify(corrupt)
+    assert frames.parse(corrupt + valid) == [
+        {"type": "probe", "idx": 1, "celsius": 60.0, "battery": 80, "rssi": -80}
+    ]
+
+
+def test_corrupt_probe_temperature_cannot_replace_60_with_12() -> None:
+    valid = frames.build(0x20, b"\x00\x32\x02\x58\x3c\xaf", header=b"\x57\xa2\x06")
+    corrupt = valid[:9] + b"\x00\x78" + valid[11:]
+    assert frames.parse(valid) == [
+        {"type": "probe", "idx": 0, "celsius": 60.0, "battery": 60, "rssi": -81}
+    ]
+    assert not frames.verify(corrupt)
+    assert frames.parse(corrupt) == []
+
+
+def test_corrupt_probe_temperature_cannot_replace_20_with_28() -> None:
+    valid = frames.build(0x20, b"\x00\x32\x00\xc8\x3c\xaf", header=b"\x57\xa2\x06")
+    corrupt = valid[:9] + b"\x01\x18" + valid[11:]
+    assert frames.parse(valid) == [
+        {"type": "probe", "idx": 0, "celsius": 20.0, "battery": 60, "rssi": -81}
+    ]
+    assert not frames.verify(corrupt)
+    assert frames.parse(corrupt) == []
+
+
+@pytest.mark.parametrize(
+    ("opcode", "payload"),
+    [
+        (0x71, b"\x00\x21"),
+        (0x73, b"\x04\x01\x09\x00\x00"),
+        (0x10, b"\x3c"),
+    ],
+)
+def test_parse_rejects_corrupt_ambient_fan_and_stand_frames(opcode: int, payload: bytes) -> None:
+    valid = frames.build(opcode, payload, header=b"\x57\xa2\x06")
+    assert frames.parse(valid)
+    corrupt = valid[:-1] + bytes((valid[-1] ^ 1,))
+    assert frames.parse(corrupt) == []
+
+
 def test_decode_fan_state_on_and_off() -> None:
     up = bytes((0x57, 0xA2, 0x06))
     on = frames.build(0x73, bytes(6) + bytes((0x04, 0x01, 0x09, 0x02, 0x02)), header=up)

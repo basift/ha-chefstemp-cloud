@@ -148,7 +148,7 @@ def split_frames(data: bytes) -> list[bytes]:
 
 def _decode_one(frame: bytes) -> dict[str, Any] | None:
     """Decode a single uplink frame into an event dict, or None."""
-    if len(frame) < 8 or frame[:2] != _SYNC:
+    if not verify(frame):
         return None
     if frame[3] != _H1 or frame[4] not in (_H2_TELEMETRY, _H2_ECHO):
         return None
