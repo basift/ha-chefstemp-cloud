@@ -51,6 +51,14 @@ STAND_SENSORS: tuple[ChefsTempSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda data: data.get("stand_battery"),
     ),
+    ChefsTempSensorDescription(
+        key="probe_frames",
+        translation_key="probe_frames",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda data: sum(
+            counts["received"] for counts in data["probe_frame_counts"].values()
+        ),
+    ),
 )
 
 
@@ -149,3 +157,13 @@ class ChefsTempSensor(ChefsTempEntity, SensorEntity):
     def native_value(self) -> Any:
         """The current sensor reading."""
         return self.entity_description.value_fn(self.coordinator.data)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Expose bounded, aggregated counts without raw frame metadata."""
+        if self.entity_description.key == "probe_frames":
+            return {
+                "period": "since integration load (volatile)",
+                **self.coordinator.data["probe_frame_counts"],
+            }
+        return None

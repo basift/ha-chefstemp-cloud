@@ -31,6 +31,7 @@ type ChefsTempConfigEntry = ConfigEntry["ChefsTempCoordinator"]
 
 DEFAULT_FAN_TARGET = 110
 FAN_RECONCILE_SECONDS = 5
+PROBE_DIAGNOSTICS_SECONDS = 60
 
 
 def _empty_state() -> dict[str, Any]:
@@ -44,6 +45,7 @@ def _empty_state() -> dict[str, Any]:
         "fan_strength": 0,
         "stand_battery": None,
         "probes": {},
+        "probe_frame_counts": {"probe_1": {"received": 0, "accepted": 0, "rejected": 0}},
         "alarm_high": None,
         "alarm_low": None,
         "fan_target": None,
@@ -84,6 +86,9 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._fan_pending: bool | None = None
         self._fan_timer: asyncio.TimerHandle | None = None
         self._fan_seen_matching = False
+        # Bounded by the one-byte probe index; None groups truncated candidates.
+        self._probe_frame_counts: dict[int | None, list[int]] = {0: [0, 0]}
+        self._probe_diagnostics_timer: asyncio.TimerHandle | None = None
 
         self._transport: CloudMqttTransport | None = None
         self.data = _empty_state()
@@ -165,7 +170,7 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @callback
     def _handle_frame(self, payload: bytes) -> None:
         """Decode a pushed payload and apply every event it carries."""
-        events = frames.parse(payload)
+        events = frames.parse(payload, self._count_probe_candidate)
         if not events:
             return
         data = dict(self.data)
@@ -176,6 +181,33 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if changed:
             data["available"] = True
             self.async_set_updated_data(data)
+
+    @callback
+    def _count_probe_candidate(self, idx: int | None, accepted: bool) -> None:
+        """Accumulate only counts; never retain frame contents or identifiers."""
+        counts = self._probe_frame_counts.setdefault(idx, [0, 0])
+        counts[0] += 1
+        counts[1] += int(accepted)
+        if self._probe_diagnostics_timer is None:
+            self._probe_diagnostics_timer = self.hass.loop.call_later(
+                PROBE_DIAGNOSTICS_SECONDS, self._publish_probe_counts
+            )
+
+    @callback
+    def _publish_probe_counts(self) -> None:
+        """Publish one aggregated snapshot at most once per interval."""
+        self._probe_diagnostics_timer = None
+        counts = {
+            "unindexed" if idx is None else f"probe_{idx + 1}": {
+                "received": values[0],
+                "accepted": values[1],
+                "rejected": values[0] - values[1],
+            }
+            for idx, values in self._probe_frame_counts.items()
+        }
+        data = dict(self.data)
+        data["probe_frame_counts"] = counts
+        self.async_set_updated_data(data)
 
     def _apply_event(self, event: dict[str, Any], data: dict[str, Any]) -> bool:
         """Merge one decoded event into the state; return whether it changed."""
@@ -293,6 +325,9 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_shutdown(self) -> None:
         """Close the MQTT channel."""
         self._cancel_fan_timer()
+        if self._probe_diagnostics_timer is not None:
+            self._probe_diagnostics_timer.cancel()
+            self._probe_diagnostics_timer = None
         if self._transport is not None:
             await self.hass.async_add_executor_job(self._transport.disconnect)
             self._transport = None

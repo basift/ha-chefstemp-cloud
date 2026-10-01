@@ -20,6 +20,7 @@ Frame layout (both directions)::
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 _SYNC = bytes((0xAA, 0x55))
@@ -186,11 +187,28 @@ def _decode_one(frame: bytes) -> dict[str, Any] | None:
     return None
 
 
-def parse(data: bytes) -> list[dict[str, Any]]:
-    """Decode every understood uplink frame in a payload."""
+def parse(
+    data: bytes,
+    on_probe_candidate: Callable[[int | None, bool], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Decode uplink frames; optionally count probe candidates without retaining bytes.
+
+    A candidate has an uplink telemetry header and probe opcode. Its index is
+    unknown if the segment ends before the first payload byte. Only a decoded
+    probe event counts as accepted; all other candidates count as rejected.
+    """
     events: list[dict[str, Any]] = []
     for frame in split_frames(data):
         event = _decode_one(frame)
+        if (
+            on_probe_candidate is not None
+            and len(frame) >= 6
+            and frame[3:6] == bytes((_H1, _H2_TELEMETRY, OP_PROBE))
+        ):
+            on_probe_candidate(
+                frame[7] if len(frame) > 7 else None,
+                event is not None and event["type"] == "probe",
+            )
         if event is not None:
             events.append(event)
     return events

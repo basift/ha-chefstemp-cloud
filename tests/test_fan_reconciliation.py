@@ -25,6 +25,9 @@ def _load(monkeypatch):
         def async_set_updated_data(self, data):
             self.data = data
 
+        async def async_shutdown(self):
+            pass
+
     stub("homeassistant", __path__=[])
     stub("homeassistant.config_entries", ConfigEntry=type("ConfigEntry", (), {"__class_getitem__": classmethod(lambda cls, item: cls)}))
     stub("homeassistant.core", HomeAssistant=object, callback=lambda func: func)
@@ -173,5 +176,60 @@ def test_latest_command_wins_and_idle_thermostat_is_enabled(monkeypatch):
         coordinator._handle_frame(module.frames.build(0x73, b"\x04\x01\x09\x02\x00", header=b"\x57\xa2\x06"))
         assert coordinator.data["fan_on"] is True
         assert coordinator.data["fan_running"] is False
+
+    asyncio.run(scenario())
+
+
+def test_probe_counts_are_batched_reset_and_do_not_retain_payload(monkeypatch):
+    module = _load(monkeypatch)
+    monkeypatch.setattr(module, "PROBE_DIAGNOSTICS_SECONDS", 0.02)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        coordinator = module.ChefsTempCoordinator(
+            SimpleNamespace(loop=loop),
+            SimpleNamespace(data={"mac": "unused"}, title="stand"),
+            SimpleNamespace(),
+        )
+        writes = []
+        original = coordinator.async_set_updated_data
+
+        def record(data):
+            writes.append(data)
+            original(data)
+
+        coordinator.async_set_updated_data = record
+        up = b"\x57\xa2\x06"
+        good = module.frames.build(0x20, b"\x00\x32\x00\xc8\x3c\xaf", header=up)
+        other = module.frames.build(0x20, b"\x01\x32\x01\x18\x50\xb0", header=up)
+        bad = good[:-1] + bytes((good[-1] ^ 1,))
+        coordinator._handle_frame(bad + other)
+        coordinator._handle_frame(bad + good)
+        coordinator._handle_frame(b"\xaa\x55" + up + b"\x20\x06")
+        assert len(writes) == 2  # only the two accepted probe events, not rejects
+        assert coordinator.data["probe_frame_counts"]["probe_1"]["received"] == 0
+        await asyncio.sleep(0.04)
+        assert len(writes) == 3  # one aggregate publication
+        assert coordinator.data["probe_frame_counts"] == {
+            "probe_1": {"received": 3, "accepted": 1, "rejected": 2},
+            "probe_2": {"received": 1, "accepted": 1, "rejected": 0},
+            "unindexed": {"received": 1, "accepted": 0, "rejected": 1},
+        }
+        assert "unused" not in repr(coordinator.data["probe_frame_counts"])
+        assert good.hex() not in repr(coordinator.data["probe_frame_counts"])
+        fresh = module.ChefsTempCoordinator(
+            SimpleNamespace(loop=loop),
+            SimpleNamespace(data={"mac": "unused"}, title="stand"),
+            SimpleNamespace(),
+        )
+        assert fresh.data["probe_frame_counts"] == {
+            "probe_1": {"received": 0, "accepted": 0, "rejected": 0}
+        }
+        coordinator._handle_frame(bad)
+        assert coordinator._probe_diagnostics_timer is not None
+        await coordinator.async_shutdown()
+        assert coordinator._probe_diagnostics_timer is None
+        await asyncio.sleep(0.04)
+        assert len(writes) == 3  # cancelled timer cannot publish after unload
 
     asyncio.run(scenario())

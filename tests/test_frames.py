@@ -185,3 +185,31 @@ def test_ping_echo_cannot_create_stand_battery(header: bytes) -> None:
     echo = frames.build(0x10, b"\x00", header=header)
     battery = bytes.fromhex("aa5558a20610016474")
     assert frames.parse(echo + battery) == [{"type": "stand_battery", "percent": 100}]
+
+
+def test_probe_candidate_classification_and_index_boundaries() -> None:
+    up = b"\x57\xa2\x06"
+    good = frames.build(0x20, b"\x00\x32\x00\xc8\x3c\xaf", header=up)
+    second = frames.build(0x20, b"\x01\x32\x01\x18\x50\xb0", header=up)
+    bad_checksum = good[:-1] + bytes((good[-1] ^ 1,))
+    bad_marker = frames.build(0x20, b"\x00\x31\x00\xc8\x3c\xaf", header=up)
+    short = b"\xaa\x55" + up + b"\x20\x06"
+    missing_checksum = good[:-1]
+    echo = frames.build(0x20, b"\x00\x32\x00\xc8\x3c\xaf", header=b"\x57\xa2\x07")
+    observed: list[tuple[int | None, bool]] = []
+
+    events = frames.parse(
+        good + bad_checksum + second + bad_marker + missing_checksum + short + echo,
+        lambda idx, accepted: observed.append((idx, accepted)),
+    )
+    assert [event["idx"] for event in events] == [0, 1]
+    assert observed == [
+        (0, True), (0, False), (1, True), (0, False), (0, False), (None, False)
+    ]
+
+
+def test_non_probe_and_unrecognizable_segments_are_not_probe_candidates() -> None:
+    observed: list[tuple[int | None, bool]] = []
+    ambient = frames.build(0x71, b"\x00\x21", header=b"\x57\xa2\x06")
+    frames.parse(b"keepalive" + ambient + b"\xaa\x55\x57\xa2", lambda *args: observed.append(args))
+    assert observed == []
