@@ -166,4 +166,6 @@ class ChefsTempSensor(ChefsTempEntity, SensorEntity):
                 "period": "since integration load (volatile)",
                 **self.coordinator.data["probe_frame_counts"],
             }
+        if self.entity_description.key == "ambient":
+            return {"ambient_sample_at": self.coordinator.data.get("ambient_sample_at")}
         return None

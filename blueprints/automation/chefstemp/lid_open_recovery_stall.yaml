@@ -1,0 +1,371 @@
+blueprint:
+  name: ChefsTemp - Lid-open recovery then stall
+  description: >-
+    OPTIONAL. Drop threshold calibrated against a 2026-10-09 live charcoal cook (full-grill deflector, 200 C target: 199-147 C meat-in drop in ~1 min, natural peak 170 C, stall 170-162 C). After a fresh rapid ambient drop near
+    Fan target, disable an already-enabled fan thermostat. Keep it off through
+    confirmed natural recovery; re-enable only after a full observation window
+    of slow/flat or reversing temperature while below target. Requires ChefsTemp
+    ambient_sample_at MQTT timestamp and fan command_status attributes. Off is
+    retained on stale telemetry, interrupted runs, timeout or uncertainty; a
+    persistent notification is left for manual review. Disable other automations
+    controlling this fan (including the other ChefsTemp blueprints). Inputs for
+    temperature differences are in °C, automatically scaled for °F entities.
+  domain: automation
+  input:
+    temperature_sensor:
+      name: ChefsTemp grill ambient sensor
+      selector:
+        entity:
+          filter:
+            domain: sensor
+            device_class: temperature
+    target_entity:
+      name: ChefsTemp Fan target
+      selector:
+        entity:
+          filter:
+            domain: number
+            device_class: temperature
+    fan_entity:
+      name: ChefsTemp fan thermostat
+      selector:
+        entity:
+          filter:
+            domain: fan
+    drop_threshold:
+      name: Consecutive-sample drop (°C difference)
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 100
+          mode: box
+    near_target_margin:
+      name: Maximum distance from target before drop (°C difference)
+      default: 12
+      selector:
+        number:
+          min: 1
+          max: 100
+          mode: box
+    recovery_rise:
+      name: Rise from post-drop trough to confirm recovery (°C difference)
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 50
+          mode: box
+    minimum_samples:
+      name: Minimum fresh samples in recovery and stall phases
+      default: 3
+      selector:
+        number:
+          min: 3
+          max: 20
+          mode: box
+    stall_window:
+      name: Observation window (seconds)
+      default: 180
+      selector:
+        number:
+          min: 30
+          max: 1800
+          mode: box
+    allowed_rise:
+      name: Maximum rise across stall window (°C difference)
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 20
+          step: 0.5
+          mode: box
+    reversal_threshold:
+      name: Sustained drop across stall window (°C difference)
+      default: 2
+      selector:
+        number:
+          min: 0.5
+          max: 30
+          step: 0.5
+          mode: box
+    target_deadband:
+      name: Required distance below target before re-enable (°C difference)
+      default: 8
+      selector:
+        number:
+          min: 1
+          max: 50
+          mode: box
+    freshness_seconds:
+      name: Maximum time without an ambient MQTT sample (seconds)
+      description: >-
+        Calibrated 2026-10-09: ambient cadence is typically 6-20 s, so 90 s
+        tolerates about 4-6 missed frames.
+      default: 90
+      selector:
+        number:
+          min: 10
+          max: 1800
+          mode: box
+    max_observation_seconds:
+      name: Maximum total observation (seconds)
+      default: 2700
+      selector:
+        number:
+          min: 120
+          max: 14400
+          mode: box
+
+mode: single
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input temperature_sensor
+
+variables:
+  temperature_sensor: !input temperature_sensor
+  target_entity: !input target_entity
+  fan_entity: !input fan_entity
+  drop_threshold: !input drop_threshold
+  near_target_margin: !input near_target_margin
+  recovery_rise: !input recovery_rise
+  minimum_samples: !input minimum_samples
+  stall_window: !input stall_window
+  allowed_rise: !input allowed_rise
+  reversal_threshold: !input reversal_threshold
+  target_deadband: !input target_deadband
+  freshness_seconds: !input freshness_seconds
+  max_observation_seconds: !input max_observation_seconds
+  notice_id: "{{ 'chefstemp_lid_recovery_' ~ fan_entity | replace('.', '_') }}"
+
+conditions:
+  - condition: template
+    value_template: >-
+      {% set before = trigger.from_state %}
+      {% set after = trigger.to_state %}
+      {% set target = states(target_entity) %}
+      {% set unit = after.attributes.get('unit_of_measurement') if after is not none else none %}
+      {% set factor = 1.8 if unit == '°F' else 1 %}
+      {% set old_ts = as_timestamp(before.attributes.get('ambient_sample_at'), 0) if before is not none else 0 %}
+      {% set new_ts = as_timestamp(after.attributes.get('ambient_sample_at'), 0) if after is not none else 0 %}
+      {{ before is not none and after is not none and unit in ['°C', '°F']
+         and before.attributes.get('unit_of_measurement') == unit
+         and state_attr(target_entity, 'unit_of_measurement') == unit
+         and is_number(before.state) and is_number(after.state) and is_number(target)
+         and old_ts > 0 and new_ts > old_ts
+         and as_timestamp(now()) - old_ts <= freshness_seconds | float
+         and as_timestamp(now()) - new_ts <= freshness_seconds | float
+         and 0 <= (before.state | float - (32 if unit == '°F' else 0)) / factor <= 500
+         and 0 <= (after.state | float - (32 if unit == '°F' else 0)) / factor <= 500
+         and (before.state | float - after.state | float) >= drop_threshold | float * factor
+         and (before.state | float - target | float) | abs <= near_target_margin | float * factor
+         and (after.state | float) < (target | float - target_deadband | float * factor)
+         and is_state(fan_entity, 'on')
+         and state_attr(fan_entity, 'thermostat_enabled_observed') is sameas true
+         and state_attr(fan_entity, 'command_status') != 'pending' }}
+
+actions:
+  - variables:
+      initial_target: "{{ states(target_entity) | float }}"
+      initial_unit: "{{ state_attr(target_entity, 'unit_of_measurement') }}"
+      factor: "{{ 1.8 if state_attr(target_entity, 'unit_of_measurement') == '°F' else 1 }}"
+      last_ts: "{{ as_timestamp(trigger.to_state.attributes.ambient_sample_at) }}"
+      trough: "{{ trigger.to_state.state | float }}"
+      recovery_count: 1
+      phase: recovery
+      window_start: 0
+      window_temp: 0
+      window_count: 0
+      deadline: "{{ as_timestamp(now()) + max_observation_seconds | float }}"
+  - action: persistent_notification.create
+    data:
+      notification_id: "{{ notice_id }}"
+      title: ChefsTemp lid-open recovery
+      message: >-
+        Lid-open recovery is starting. Verify the thermostat is off. If Home
+        Assistant restarts or this automation is interrupted, it stays off;
+        inspect the grill and fan manually before restoring it.
+  - action: fan.turn_off
+    target:
+      entity_id: !input fan_entity
+    continue_on_error: true
+  - wait_template: >-
+      {{ is_state(fan_entity, 'off')
+         and state_attr(fan_entity, 'command_status') == 'observed'
+         and state_attr(fan_entity, 'thermostat_enabled_observed') is sameas false }}
+    timeout:
+      seconds: 20
+    continue_on_timeout: true
+  - if:
+      - condition: template
+        value_template: "{{ not wait.completed }}"
+    then:
+      - action: persistent_notification.create
+        data:
+          notification_id: "{{ notice_id }}"
+          title: ChefsTemp fan-off unconfirmed
+          message: Fan-off command was not confirmed by device telemetry. Inspect manually; no automatic re-enable.
+      - stop: Fan-off command unconfirmed
+  - repeat:
+      while:
+        - condition: template
+          value_template: "{{ phase != 'done' }}"
+      sequence:
+        - wait_for_trigger:
+            - trigger: state
+              entity_id: !input temperature_sensor
+              id: sample
+            - trigger: state
+              entity_id: !input fan_entity
+              to: "on"
+              id: fan_override
+            - trigger: state
+              entity_id: !input target_entity
+              id: target_change
+          timeout:
+            seconds: "{{ [freshness_seconds | float, deadline | float - as_timestamp(now())] | min | int }}"
+          continue_on_timeout: true
+        - if:
+            - condition: template
+              value_template: >-
+                {{ not wait.completed or as_timestamp(now()) >= deadline | float
+                   or as_timestamp(now()) - last_ts | float > freshness_seconds | float
+                   or wait.trigger.id in ['fan_override', 'target_change']
+                   or not is_state(fan_entity, 'off')
+                   or state_attr(fan_entity, 'command_status') != 'observed'
+                   or state_attr(fan_entity, 'thermostat_enabled_observed') is not sameas false
+                   or not is_number(states(target_entity))
+                   or states(target_entity) | float != initial_target | float
+                   or state_attr(target_entity, 'unit_of_measurement') != initial_unit
+                   or state_attr(temperature_sensor, 'unit_of_measurement') != initial_unit }}
+          then:
+            - variables:
+                phase: done
+          else:
+            - variables:
+                reading: "{{ wait.trigger.to_state.state }}"
+                sample_ts: "{{ as_timestamp(wait.trigger.to_state.attributes.get('ambient_sample_at'), 0) }}"
+            - if:
+                - condition: template
+                  value_template: >-
+                    {{ not is_number(reading) or reading in ['unknown', 'unavailable']
+                       or sample_ts | float <= 0
+                       or as_timestamp(now()) - sample_ts | float > freshness_seconds | float
+                       or not (0 <= (reading | float - (32 if initial_unit == '°F' else 0)) / factor | float <= 500) }}
+              then:
+                - variables:
+                    phase: done
+              else:
+                - if:
+                    - condition: template
+                      value_template: "{{ sample_ts | float > last_ts | float }}"
+                  then:
+                    - variables:
+                        last_ts: "{{ sample_ts | float }}"
+                    - if:
+                        - condition: template
+                          value_template: >-
+                            {{ reading | float >= initial_target | float - target_deadband | float * factor | float }}
+                      then:
+                        - variables:
+                            phase: done
+                      else:
+                        - choose:
+                            - conditions: "{{ phase == 'recovery' }}"
+                              sequence:
+                                - variables:
+                                    trough: "{{ [trough | float, reading | float] | min }}"
+                                    recovery_count: "{{ recovery_count | int + 1 }}"
+                                - if:
+                                    - condition: template
+                                      value_template: >-
+                                        {{ recovery_count | int >= minimum_samples | int
+                                           and reading | float - trough | float >= recovery_rise | float * factor | float }}
+                                  then:
+                                    - variables:
+                                        phase: stall
+                                        window_start: "{{ sample_ts | float }}"
+                                        window_temp: "{{ reading | float }}"
+                                        window_count: 1
+                            - conditions: "{{ phase == 'stall' }}"
+                              sequence:
+                                - variables:
+                                    window_count: "{{ window_count | int + 1 }}"
+                                - if:
+                                    - condition: template
+                                      value_template: >-
+                                        {{ sample_ts | float - window_start | float >= stall_window | float
+                                           and window_count | int >= minimum_samples | int }}
+                                  then:
+                                    - if:
+                                        - condition: template
+                                          value_template: >-
+                                            {{ reading | float - window_temp | float <= allowed_rise | float * factor | float
+                                               or window_temp | float - reading | float >= reversal_threshold | float * factor | float }}
+                                      then:
+                                        - variables:
+                                            phase: enable
+                                      else:
+                                        - variables:
+                                            window_start: "{{ sample_ts | float }}"
+                                            window_temp: "{{ reading | float }}"
+                                            window_count: 1
+                    - if:
+                        - condition: template
+                          value_template: "{{ phase == 'enable' }}"
+                      then:
+                        - if:
+                            - condition: template
+                              value_template: >-
+                                {{ is_state(fan_entity, 'off')
+                                   and state_attr(fan_entity, 'command_status') == 'observed'
+                                   and state_attr(fan_entity, 'thermostat_enabled_observed') is sameas false
+                                   and is_number(states(target_entity))
+                                   and states(target_entity) | float == initial_target | float
+                                   and state_attr(target_entity, 'unit_of_measurement') == initial_unit
+                                   and state_attr(temperature_sensor, 'unit_of_measurement') == initial_unit
+                                   and is_number(states(temperature_sensor))
+                                   and states(temperature_sensor) | float < initial_target | float - target_deadband | float * factor | float
+                                   and state_attr(temperature_sensor, 'ambient_sample_at') == wait.trigger.to_state.attributes.get('ambient_sample_at') }}
+                          then:
+                            - action: fan.turn_on
+                              target:
+                                entity_id: !input fan_entity
+                              continue_on_error: true
+                            - wait_template: >-
+                                {{ is_state(fan_entity, 'on')
+                                   and state_attr(fan_entity, 'command_status') == 'observed'
+                                   and state_attr(fan_entity, 'thermostat_enabled_observed') is sameas true }}
+                              timeout:
+                                seconds: 20
+                              continue_on_timeout: true
+                            - if:
+                                - condition: template
+                                  value_template: "{{ wait.completed }}"
+                              then:
+                                - action: persistent_notification.dismiss
+                                  data:
+                                    notification_id: "{{ notice_id }}"
+                              else:
+                                - action: persistent_notification.create
+                                  data:
+                                    notification_id: "{{ notice_id }}"
+                                    title: ChefsTemp fan-on unconfirmed
+                                    message: Fan enable after recovery was not confirmed by device telemetry. Inspect manually.
+                        - variables:
+                            phase: done
+  - if:
+      - condition: template
+        value_template: "{{ is_state(fan_entity, 'off') }}"
+    then:
+      - action: persistent_notification.create
+        data:
+          notification_id: "{{ notice_id }}"
+          title: ChefsTemp recovery stopped; fan left off
+          message: >-
+            Recovery ended without re-enabling the fan (target reached/changed,
+            stale or unavailable readings, override, or observation timeout).
+            Inspect the grill and fan manually.

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -38,6 +38,7 @@ def _empty_state() -> dict[str, Any]:
     return {
         "available": False,
         "ambient": None,
+        "ambient_sample_at": None,
         "fan_on": False,
         "fan_enabled": None,
         "fan_running": None,
@@ -214,8 +215,10 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         kind = event["type"]
         if kind == "ambient":
             data["ambient"] = event["celsius"]
+            data["ambient_sample_at"] = datetime.now(UTC).isoformat()
         elif kind == "ambient_disconnect":
             data["ambient"] = None
+            data["ambient_sample_at"] = None
         elif kind == "fan":
             data["fan_enabled"] = event["on"]
             data["fan_running"] = event["on"] and event["strength"] > 0

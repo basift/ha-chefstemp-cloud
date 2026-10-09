@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -49,6 +51,74 @@ def _load(monkeypatch):
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     return module
+
+
+def test_valid_probe_frames_route_to_their_own_temperature_sensors(monkeypatch):
+    module = _load(monkeypatch)
+    root = Path(__file__).resolve().parent.parent / "custom_components" / "chefstemp"
+
+    def stub(name, **attrs):
+        fake = ModuleType(name)
+        fake.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, fake)
+
+    @dataclass(frozen=True, kw_only=True)
+    class Description:
+        key: str
+        translation_key: str
+        translation_placeholders: dict | None = None
+        device_class: str | None = None
+        native_unit_of_measurement: str | None = None
+        state_class: str | None = None
+        entity_category: str | None = None
+        entity_registry_enabled_default: bool = True
+
+    stub("homeassistant.components", __path__=[])
+    stub("homeassistant.components.sensor", SensorDeviceClass=SimpleNamespace(TEMPERATURE="temperature", BATTERY="battery", SIGNAL_STRENGTH="signal"), SensorEntity=object, SensorEntityDescription=Description, SensorStateClass=SimpleNamespace(MEASUREMENT="measurement"))
+    stub("homeassistant.const", PERCENTAGE="%", SIGNAL_STRENGTH_DECIBELS_MILLIWATT="dBm", EntityCategory=SimpleNamespace(DIAGNOSTIC="diagnostic"), UnitOfTemperature=SimpleNamespace(CELSIUS="°C"))
+    stub("homeassistant.helpers.entity_registry")
+    stub("homeassistant.helpers.entity_platform", AddConfigEntryEntitiesCallback=object)
+
+    class BaseEntity:
+        def __init__(self, coordinator, key):
+            self.coordinator = coordinator
+
+    stub("custom_components.chefstemp.entity", ChefsTempEntity=BaseEntity)
+    spec = importlib.util.spec_from_file_location("custom_components.chefstemp.sensor", root / "sensor.py")
+    sensor = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, sensor)
+    spec.loader.exec_module(sensor)
+
+    loop = asyncio.new_event_loop()
+    try:
+        coordinator = module.ChefsTempCoordinator(SimpleNamespace(loop=loop), SimpleNamespace(data={"mac": "unused"}, title="stand"), SimpleNamespace())
+        uplink = b"\x57\xa2\x06"
+        coordinator._handle_frame(module.frames.build(0x20, b"\x00\x32\x00\x78\x3c\xaf", header=uplink))
+        coordinator._handle_frame(module.frames.build(0x20, b"\x01\x32\x02\x58\x50\xb0", header=uplink))
+        first = sensor.ChefsTempSensor(coordinator, sensor._probe_descriptions(0)[0])
+        second = sensor.ChefsTempSensor(coordinator, sensor._probe_descriptions(1)[0])
+        assert first.native_value == 12.0
+        assert second.native_value == 60.0
+        assert coordinator.data["probes"][0]["battery"] == 60
+        assert coordinator.data["probes"][1]["battery"] == 80
+    finally:
+        loop.close()
+
+
+def test_ambient_updates_do_not_refresh_or_clear_cached_probe(monkeypatch):
+    module = _load(monkeypatch)
+    loop = asyncio.new_event_loop()
+    try:
+        coordinator = module.ChefsTempCoordinator(
+            SimpleNamespace(loop=loop), SimpleNamespace(data={"mac": "unused"}, title="stand"), SimpleNamespace(),
+        )
+        uplink = b"\x57\xa2\x06"
+        coordinator._handle_frame(module.frames.build(0x20, b"\x00\x32\x00\x78\x3c\xaf", header=uplink))
+        coordinator._handle_frame(module.frames.build(0x71, b"\x00\x21", header=uplink))
+        assert coordinator.data["ambient"] == 33
+        assert coordinator.data["probes"][0]["celsius"] == 12.0
+    finally:
+        loop.close()
 
 
 def test_off_reconciles_stale_on_then_fresh_on_and_observed_off(monkeypatch):
@@ -233,3 +303,29 @@ def test_probe_counts_are_batched_reset_and_do_not_retain_payload(monkeypatch):
         assert len(writes) == 3  # cancelled timer cannot publish after unload
 
     asyncio.run(scenario())
+
+
+def test_repeated_equal_ambient_frames_advance_only_mqtt_sample_timestamp(monkeypatch):
+    module = _load(monkeypatch)
+    times = iter((datetime(2026, 9, 29, 12, 0, tzinfo=UTC),
+                  datetime(2026, 9, 29, 12, 1, tzinfo=UTC)))
+
+    class Clock:
+        @staticmethod
+        def now(_timezone):
+            return next(times)
+
+    monkeypatch.setattr(module, "datetime", Clock)
+    coordinator = module.ChefsTempCoordinator(
+        SimpleNamespace(), SimpleNamespace(data={"mac": "unused"}, title="stand"),
+        SimpleNamespace(),
+    )
+    ambient_frame = bytes.fromhex("aa5557a2067102002293")
+    coordinator._handle_frame(ambient_frame)
+    first = coordinator.data["ambient_sample_at"]
+    assert coordinator.data["ambient"] == 34
+    coordinator._handle_frame(ambient_frame)
+    assert coordinator.data["ambient"] == 34
+    assert coordinator.data["ambient_sample_at"] > first
+    coordinator._apply_event({"type": "stand_battery", "percent": 50}, coordinator.data)
+    assert coordinator.data["ambient_sample_at"] == "2026-09-29T12:01:00+00:00"

@@ -62,17 +62,33 @@ Assistant automation.
 
 ### Example automations
 
-The repository includes two optional [Home Assistant automation blueprints](blueprints/automation/chefstemp/):
+The repository includes three optional [Home Assistant automation blueprints](blueprints/automation/chefstemp/):
 
 - [Lid-open fan cooldown](blueprints/automation/chefstemp/lid_open_fan_cooldown.yaml) turns the thermostat off after a rapid ambient-temperature drop and restores it after a cooldown only if it was enabled beforehand and no one has turned it back on.
 - [Temperature-band hysteresis](blueprints/automation/chefstemp/temperature_band_hysteresis.yaml) enables the thermostat below a lower probe-temperature threshold and disables it above an upper threshold.
+- [Lid-open recovery then stall](blueprints/automation/chefstemp/lid_open_recovery_stall.yaml) disables an already-on thermostat after a fresh near-target ambient drop, waits for a confirmed natural rise, and re-enables only after the rise slows/plateaus or reverses over a full window while meaningfully below Fan target. On uncertainty, timeout or interruption/restart, it leaves the fan off with a persistent notification for manual review. Fan-off must be confirmed by device telemetry before observation begins.
 
 Import the desired blueprint into Home Assistant, then select your grill/probe
-temperature sensor and ChefsTemp fan. Turn on **Show temperature in °C** when
-using these blueprints, which expect sensor readings in °C; invalid or
-out-of-range readings (outside 0–500 °C) are ignored. These blueprints control
-thermostat enable, not actual motor speed or physical fan activity. Do not run
-both against the same fan unless you intend their actions to interact.
+temperature sensor and ChefsTemp fan. The older two blueprints require **Show
+temperature in °C** and reject other units. The recovery/stall blueprint instead
+requires a ChefsTemp **grill ambient sensor**, its **Fan target** number in the
+same unit (°C or °F), and the new `ambient_sample_at` MQTT timestamp attribute.
+It interprets configured temperature *differences* as °C and scales for °F.
+Its drop threshold (5 °C) was calibrated against a 2026-10-09 live charcoal
+cook: both real meat-in drops (199→147 °C and 200→156 °C in about a minute)
+arrived in 4–9 °C single-sample steps, so the earlier default of 10 would never
+have fired; steady-state wobble stays within ±1 °C. Ambient cadence measured
+6–20 s, so the 90-second freshness default tolerates roughly 4–6 missed frames.
+Each ambient MQTT frame updates the timestamp, even at an unchanged temperature;
+this produces one sensor state event (and potentially a Recorder write) per
+ambient frame, but unrelated polls/frames do not refresh it.
+Invalid or out-of-range values are ignored. All blueprints control thermostat
+enable, **not** actual motor speed or physical fan activity. **Disable both
+older blueprints and any other automation controlling the same fan before
+enabling recovery/stall**; competing automation can defeat the safety hold.
+An already-off fan is never automatically enabled by this blueprint. Following
+an interrupted run/restart, inspect its notification and fan manually; no
+automatic restart/recovery latch is installed.
 
 ## Installation
 
