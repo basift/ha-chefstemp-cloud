@@ -210,15 +210,20 @@ def test_probe_candidate_classification_and_index_boundaries() -> None:
     short = b"\xaa\x55" + up + b"\x20\x06"
     missing_checksum = good[:-1]
     echo = frames.build(0x20, b"\x00\x32\x00\xc8\x3c\xaf", header=b"\x57\xa2\x07")
-    observed: list[tuple[int | None, bool]] = []
+    observed: list[tuple[int | None, bool, str]] = []
 
     events = frames.parse(
         good + bad_checksum + second + bad_marker + missing_checksum + short + echo,
-        lambda idx, accepted: observed.append((idx, accepted)),
+        lambda idx, accepted, reason: observed.append((idx, accepted, reason)),
     )
     assert [event["idx"] for event in events] == [0, 1]
     assert observed == [
-        (0, True), (0, False), (1, True), (0, False), (0, False), (None, False)
+        (0, True, "accepted"),
+        (0, False, "checksum"),
+        (1, True, "accepted"),
+        (0, False, "payload_marker"),
+        (0, False, "truncated"),
+        (None, False, "truncated"),
     ]
 
 

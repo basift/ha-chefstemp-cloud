@@ -59,6 +59,18 @@ STAND_SENSORS: tuple[ChefsTempSensorDescription, ...] = (
             counts["received"] for counts in data["probe_frame_counts"].values()
         ),
     ),
+    ChefsTempSensorDescription(
+        key="probe_rejections",
+        translation_key="probe_rejections",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda data: data.get("probe_diagnostics", {}).get("rejected", 0),
+    ),
+    ChefsTempSensorDescription(
+        key="probe_last_rejection",
+        translation_key="probe_last_rejection",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda data: data.get("probe_diagnostics", {}).get("last_rejection_reason"),
+    ),
 )
 
 
@@ -168,4 +180,9 @@ class ChefsTempSensor(ChefsTempEntity, SensorEntity):
             }
         if self.entity_description.key == "ambient":
             return {"ambient_sample_at": self.coordinator.data.get("ambient_sample_at")}
+        if self.entity_description.key == "probe_rejections":
+            return {
+                "period": "since integration load (volatile)",
+                **self.coordinator.data.get("probe_diagnostics", {}),
+            }
         return None

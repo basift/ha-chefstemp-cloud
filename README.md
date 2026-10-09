@@ -24,6 +24,8 @@ Per stand (one Home Assistant device):
 | Grill temperature | sensor | ambient temperature at the stand (°C) |
 | Stand battery | sensor | % (diagnostic) |
 | Probe frame candidates since load | sensor | volatile diagnostics; total candidates, with per-index received/accepted/rejected attributes |
+| Probe frame rejections since load | sensor | volatile diagnostic total; attributes include `checksum`, `truncated`, `payload_length`, and `payload_marker` reason counts, per-index totals, and last rejection timestamp |
+| Last probe frame rejection | sensor | latest rejection reason, or unknown until a candidate is rejected |
 | Probe N temperature | sensor | meat probe (°C), one set per connected probe |
 | Probe N battery | sensor | % (diagnostic) |
 | Probe N signal | sensor | dBm (diagnostic, disabled by default) |
@@ -37,11 +39,14 @@ The probe-frame diagnostic sensor exists even before any probe temperature entit
 appears. `probe_1` is protocol index 0; other indices appear only if observed.
 `unindexed` counts truncated probe candidates without an index. `received` counts
 probe-shaped uplink segments, `accepted` counts checksum-valid parsed probe
-events, and `rejected` counts malformed or checksum-invalid candidates; no
-candidate means no probe-shaped uplink was observed by this integration. Counts
-are aggregated at most once per minute, reset on integration reload or Core
-restart, and never include frame bytes, MQTT topics, or device identifiers.
-They cannot explain historical readings or establish why a probe did not send.
+events, and `rejected` counts malformed or checksum-invalid candidates. The
+rejection sensor classifies candidates as `checksum`, `truncated`,
+`payload_length`, or `payload_marker`; this is validation-stage evidence, not a
+claim about what happened before MQTT delivery. No candidate means no
+probe-shaped uplink was observed by this integration. Counts are aggregated at
+most once per minute, reset on integration reload or Core restart, and never
+include frame bytes, MQTT topics, or device identifiers. They cannot explain
+historical readings or establish why a probe did not send.
 
 ### How fan control works
 

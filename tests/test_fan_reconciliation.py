@@ -325,6 +325,15 @@ def test_probe_counts_are_batched_reset_and_do_not_retain_payload(monkeypatch):
             "probe_2": {"received": 1, "accepted": 1, "rejected": 0},
             "unindexed": {"received": 1, "accepted": 0, "rejected": 1},
         }
+        diagnostics = coordinator.data["probe_diagnostics"]
+        assert diagnostics["received"] == 5
+        assert diagnostics["accepted"] == 2
+        assert diagnostics["rejected"] == 3
+        assert diagnostics["reasons"] == {"checksum": 2, "truncated": 1}
+        assert diagnostics["by_probe"]["probe_1"]["reasons"] == {"checksum": 2}
+        assert diagnostics["by_probe"]["unindexed"]["reasons"] == {"truncated": 1}
+        assert diagnostics["last_rejection_reason"] == "truncated"
+        assert diagnostics["last_rejection_at"]
         assert "unused" not in repr(coordinator.data["probe_frame_counts"])
         assert good.hex() not in repr(coordinator.data["probe_frame_counts"])
         fresh = module.ChefsTempCoordinator(

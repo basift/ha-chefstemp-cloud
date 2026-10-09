@@ -49,6 +49,15 @@ def _empty_state() -> dict[str, Any]:
         "stand_battery": None,
         "probes": {},
         "probe_frame_counts": {"probe_1": {"received": 0, "accepted": 0, "rejected": 0}},
+        "probe_diagnostics": {
+            "received": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "reasons": {},
+            "by_probe": {"probe_1": {"received": 0, "accepted": 0, "rejected": 0, "reasons": {}}},
+            "last_rejection_reason": None,
+            "last_rejection_at": None,
+        },
         "alarm_high": None,
         "alarm_low": None,
         "fan_target": None,
@@ -92,6 +101,9 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._fan_seen_matching = False
         # Bounded by the one-byte probe index; None groups truncated candidates.
         self._probe_frame_counts: dict[int | None, list[int]] = {0: [0, 0]}
+        self._probe_rejection_counts: dict[int | None, dict[str, int]] = {0: {}}
+        self._last_probe_rejection_reason: str | None = None
+        self._last_probe_rejection_at: str | None = None
         self._probe_diagnostics_timer: asyncio.TimerHandle | None = None
 
         self._transport: CloudMqttTransport | None = None
@@ -189,11 +201,16 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.async_set_updated_data(data)
 
     @callback
-    def _count_probe_candidate(self, idx: int | None, accepted: bool) -> None:
-        """Accumulate only counts; never retain frame contents or identifiers."""
+    def _count_probe_candidate(self, idx: int | None, accepted: bool, reason: str) -> None:
+        """Accumulate bounded reason counts; never retain frame contents."""
         counts = self._probe_frame_counts.setdefault(idx, [0, 0])
         counts[0] += 1
         counts[1] += int(accepted)
+        if not accepted:
+            reasons = self._probe_rejection_counts.setdefault(idx, {})
+            reasons[reason] = reasons.get(reason, 0) + 1
+            self._last_probe_rejection_reason = reason
+            self._last_probe_rejection_at = datetime.now(UTC).isoformat()
         if self._probe_diagnostics_timer is None:
             self._probe_diagnostics_timer = self.hass.loop.call_later(
                 PROBE_DIAGNOSTICS_SECONDS, self._publish_probe_counts
@@ -211,8 +228,32 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             }
             for idx, values in self._probe_frame_counts.items()
         }
+        by_probe: dict[str, dict[str, Any]] = {}
+        reason_totals: dict[str, int] = {}
+        for idx, values in self._probe_frame_counts.items():
+            name = "unindexed" if idx is None else f"probe_{idx + 1}"
+            reasons = dict(self._probe_rejection_counts.get(idx, {}))
+            by_probe[name] = {
+                "received": values[0],
+                "accepted": values[1],
+                "rejected": values[0] - values[1],
+                "reasons": reasons,
+            }
+            for reason, total in reasons.items():
+                reason_totals[reason] = reason_totals.get(reason, 0) + total
+        received = sum(item["received"] for item in by_probe.values())
+        accepted = sum(item["accepted"] for item in by_probe.values())
         data = dict(self.data)
         data["probe_frame_counts"] = counts
+        data["probe_diagnostics"] = {
+            "received": received,
+            "accepted": accepted,
+            "rejected": received - accepted,
+            "reasons": reason_totals,
+            "by_probe": by_probe,
+            "last_rejection_reason": self._last_probe_rejection_reason,
+            "last_rejection_at": self._last_probe_rejection_at,
+        }
         self.async_set_updated_data(data)
 
     def _apply_event(self, event: dict[str, Any], data: dict[str, Any]) -> bool:

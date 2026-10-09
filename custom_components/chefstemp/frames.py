@@ -190,15 +190,33 @@ def _decode_one(frame: bytes) -> dict[str, Any] | None:
     return None
 
 
+def _probe_candidate_result(frame: bytes) -> tuple[int | None, bool, str]:
+    """Classify a probe candidate without retaining its bytes."""
+    idx = frame[7] if len(frame) > 7 else None
+    if len(frame) < 7:
+        return idx, False, "truncated"
+    length = frame[6]
+    expected_end = 7 + length
+    if length < 6:
+        return idx, False, "payload_length"
+    if len(frame) < expected_end + 1:
+        return idx, False, "truncated"
+    if _checksum(frame[2:expected_end]) != frame[expected_end]:
+        return idx, False, "checksum"
+    if frame[8] != 0x32:
+        return idx, False, "payload_marker"
+    return idx, True, "accepted"
+
+
 def parse(
     data: bytes,
-    on_probe_candidate: Callable[[int | None, bool], None] | None = None,
+    on_probe_candidate: Callable[[int | None, bool, str], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Decode uplink frames; optionally count probe candidates without retaining bytes.
+    """Decode uplink frames; optionally classify probe candidates.
 
     A candidate has an uplink telemetry header and probe opcode. Its index is
-    unknown if the segment ends before the first payload byte. Only a decoded
-    probe event counts as accepted; all other candidates count as rejected.
+    unknown if the segment ends before the first payload byte. The callback
+    receives ``(index, accepted, reason)`` and no raw frame bytes.
     """
     events: list[dict[str, Any]] = []
     for frame in split_frames(data):
@@ -208,10 +226,7 @@ def parse(
             and len(frame) >= 6
             and frame[3:6] == bytes((_H1, _H2_TELEMETRY, OP_PROBE))
         ):
-            on_probe_candidate(
-                frame[7] if len(frame) > 7 else None,
-                event is not None and event["type"] == "probe",
-            )
+            on_probe_candidate(*_probe_candidate_result(frame))
         if event is not None:
             events.append(event)
     return events

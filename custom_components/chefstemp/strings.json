@@ -41,6 +41,8 @@
       "ambient": { "name": "Grill temperature" },
       "stand_battery": { "name": "Stand battery" },
       "probe_frames": { "name": "Probe frame candidates since load" },
+      "probe_rejections": { "name": "Probe frame rejections since load" },
+      "probe_last_rejection": { "name": "Last probe frame rejection" },
       "probe_temperature": { "name": "Probe {idx} temperature" },
       "probe_battery": { "name": "Probe {idx} battery" },
       "probe_signal": { "name": "Probe {idx} signal" }
