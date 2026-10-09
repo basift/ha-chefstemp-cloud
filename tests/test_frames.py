@@ -72,6 +72,20 @@ def test_decode_real_frames(hex_frame: str, expected: dict) -> None:
     assert frames.parse(bytes.fromhex(hex_frame)) == [expected]
 
 
+def test_ambient_disconnect_code() -> None:
+    """Error codes 0xFEFE/0xFF02 in ambient mean the grill probe is disconnected."""
+    for payload in (b"\xfe\xfe", b"\xff\x02"):
+        frame = frames.build(op=0x71, payload=payload, header=b"\x57\xa2\x06")
+        assert frames.parse(frame) == [{"type": "ambient_disconnect"}]
+
+
+def test_valid_ambient_not_affected_by_disconnect_code() -> None:
+    """Ordinary ambient temperatures still decode as temperatures."""
+    for payload, expected in ((b"\x00\x22", 34), (b"\x00\x10", 16)):
+        frame = frames.build(op=0x71, payload=payload, header=b"\x57\xa2\x06")
+        assert frames.parse(frame) == [{"type": "ambient", "celsius": expected}]
+
+
 @pytest.mark.parametrize("length", range(14))
 def test_parse_rejects_truncated_probe_frame(length: int) -> None:
     frame = frames.build(0x20, b"\x00\x32\x02\x58\x3c\xaf", header=b"\x57\xa2\x06")

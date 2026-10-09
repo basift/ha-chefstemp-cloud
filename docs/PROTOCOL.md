@@ -33,7 +33,7 @@ protocol value, not a sequence counter.
 
 | Opcode | Meaning | Payload summary |
 |---|---|---|
-| `71` | Grill ambient temperature | Unsigned 16-bit big-endian whole °C |
+| `71` | Grill ambient temperature | Unsigned 16-bit big-endian whole degrees C; `0xFEFE`/`0xFF02` means the grill probe is disconnected/error, not a temperature |
 | `20` | Probe reading | Probe index, marker, unsigned 16-bit tenths of °C, battery percentage, signed RSSI |
 | `73` | Device/fan state | Device information followed by thermostat mode and device-selected strength |
 | `10` | Stand status/battery | Status byte in the stand-status frame variant |

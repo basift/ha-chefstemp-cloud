@@ -214,6 +214,8 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         kind = event["type"]
         if kind == "ambient":
             data["ambient"] = event["celsius"]
+        elif kind == "ambient_disconnect":
+            data["ambient"] = None
         elif kind == "fan":
             data["fan_enabled"] = event["on"]
             data["fan_running"] = event["on"] and event["strength"] > 0

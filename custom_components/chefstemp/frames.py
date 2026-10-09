@@ -160,7 +160,10 @@ def _decode_one(frame: bytes) -> dict[str, Any] | None:
         return None
 
     if op == OP_AMBIENT and length >= 2:
-        return {"type": "ambient", "celsius": int.from_bytes(payload[:2], "big")}
+        celsius = int.from_bytes(payload[:2], "big")
+        if celsius in (65278, 65282):  # 0xFEFE/0xFF02: device error / disconnected grill probe
+            return {"type": "ambient_disconnect"}
+        return {"type": "ambient", "celsius": celsius}
 
     if op == OP_PROBE and frame[4] == _H2_TELEMETRY and length >= 6 and payload[1] == 0x32:
         # <idx><b1=0x32 const><temp u16 BE /10><battery %><rssi int8>
