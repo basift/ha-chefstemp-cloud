@@ -22,8 +22,9 @@ CONF_DEVICE_MAC: Final = "device_mac"
 CONF_DEVICE_NAME: Final = "device_name"
 
 # Live temperatures arrive by MQTT push; the poll only refreshes metadata
-# (alarm setpoints, fan target, device presence) and re-authenticates.
-DEFAULT_SCAN_INTERVAL: Final = 300
+# (alarm setpoints, fan target, device presence) and re-authenticates. It is
+# also how edits made in the official app reach HA, so it stays short.
+DEFAULT_SCAN_INTERVAL: Final = 60
 
 # The vendor JWT is short-lived and there is no refresh token, so the stored
 # password is used to sign in again when it lapses.

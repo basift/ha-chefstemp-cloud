@@ -18,8 +18,9 @@ changing anything that builds or parses frames.
   path that nobody has run against hardware.
 - **State comes only from the device** — a pushed MQTT frame or a command echo.
   Setpoints HA writes (fan target, alarms) are *not* reflected back in telemetry
-  and are *not* synced to the cloud copy, so HA owns them after the initial seed;
-  never re-read them from the cloud and clobber the user's value.
+  and are *not* synced to the cloud copy. The official app *does* save its edits
+  to the cloud copy, so the poll adopts a cloud setpoint only when it changed
+  since the previous poll; never overwrite HA's value with an unchanged cloud copy.
 - **The fan is a thermostat, not a variable-speed fan.** It runs when the target
   is above ambient and picks its own strength; commanded strength does nothing
   (verified by ear). Keep the fan entity on/off only.

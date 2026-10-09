@@ -3,9 +3,11 @@
 Live values (grill temp, probe temp/battery/signal, fan running state, stand
 battery) arrive as pushed MQTT frames and are decoded by frames.py. The REST
 poll only refreshes metadata that telemetry never carries — whether the device
-is still on the account, and the initial seed for the fan target and the alarm
-setpoints. Those setpoints are then owned by Home Assistant: a device command
-does not update the cloud copy, so re-reading it would clobber the user's value.
+is still on the account, and the fan target and alarm setpoints. Those
+setpoints are shared with the official app: it saves them to the cloud copy,
+while HA's own device commands never reach the cloud. So a cloud value is
+adopted only on first load or when it changed since the previous poll; an
+unchanged cloud copy never clobbers a value written from HA.
 """
 
 from __future__ import annotations
@@ -82,7 +84,8 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.fan_target = DEFAULT_FAN_TARGET
         self.fan_strength = frames.FAN_STRENGTH
         self.fan_seconds = frames.FAN_SECONDS
-        self._seeded = False
+        # Setpoints as last seen in the cloud copy, to detect official-app edits.
+        self._cloud_seen: dict[str, int] = {}
         self._fan_lock = asyncio.Lock()
         self._fan_pending: bool | None = None
         self._fan_timer: asyncio.TimerHandle | None = None
@@ -99,7 +102,7 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ------------------------------------------------------------------
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Refresh device presence and seed setpoints once."""
+        """Refresh device presence and pick up setpoints edited in the official app."""
         try:
             devices = await self.api.async_get_devices()
         except ChefsTempAuthError as err:
@@ -113,32 +116,34 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data = dict(self.data)
         data["available"] = device is not None
         if device is not None:
-            self._seed_from_cloud(device, data)
+            self._sync_from_cloud(device, data)
         return data
 
-    def _seed_from_cloud(self, device: dict[str, Any], data: dict[str, Any]) -> None:
-        """Take the initial fan target and alarm setpoints from the cloud copy.
+    def _sync_from_cloud(self, device: dict[str, Any], data: dict[str, Any]) -> None:
+        """Adopt the fan target and alarm setpoints when the cloud copy changes.
 
-        Only on first load: afterwards HA owns these, since the device does not
-        echo them back over telemetry and does not sync HA's writes to the cloud.
+        The official app saves its edits to the cloud; HA's writes go only to the
+        device and are never echoed back. A value is therefore taken on first load
+        and whenever it differs from the previous poll, and otherwise left alone.
+        The device already applied an official-app edit, so nothing is sent.
         """
-        if self._seeded:
-            return
-        fan = device.get("fan") or {}
-        if isinstance(fan, dict) and fan.get("temperature") is not None:
+        fan = device.get("fan")
+        cloud: dict[str, Any] = {
+            "fan_target": fan.get("temperature") if isinstance(fan, dict) else None,
+            "alarm_high": device.get("alarm_high"),
+            "alarm_low": device.get("alarm_low"),
+        }
+        for key, raw in cloud.items():
             try:
-                self.fan_target = round(float(fan["temperature"]))
+                value = round(float(raw))
             except (TypeError, ValueError):
-                pass
+                continue
+            if self._cloud_seen.get(key) != value:
+                data[key] = value
+                if key == "fan_target":
+                    self.fan_target = value
+            self._cloud_seen[key] = value
         data["fan_target"] = self.fan_target
-        for key, src in (("alarm_high", "alarm_high"), ("alarm_low", "alarm_low")):
-            value = device.get(src)
-            if value is not None:
-                try:
-                    data[key] = round(float(value))
-                except (TypeError, ValueError):
-                    pass
-        self._seeded = True
 
     # ------------------------------------------------------------------
     # Live updates (MQTT push)

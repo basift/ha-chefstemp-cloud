@@ -250,6 +250,46 @@ def test_latest_command_wins_and_idle_thermostat_is_enabled(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_cloud_setpoints_are_adopted_only_when_the_official_app_changes_them(monkeypatch):
+    module = _load(monkeypatch)
+
+    async def scenario():
+        coordinator = module.ChefsTempCoordinator(SimpleNamespace(loop=asyncio.get_running_loop()), SimpleNamespace(data={"mac": "unused"}, title="stand"), SimpleNamespace())
+        sent = []
+
+        async def send(frame):
+            sent.append(frame)
+
+        coordinator._async_send = send
+
+        def poll(fan, high, low):
+            device = {"fan": {"temperature": fan}, "alarm_high": high, "alarm_low": low}
+            data = dict(coordinator.data)
+            coordinator._sync_from_cloud(device, data)
+            coordinator.async_set_updated_data(data)
+
+        poll(115.0, 130.0, 95.0)
+        assert (coordinator.data["fan_target"], coordinator.data["alarm_high"], coordinator.data["alarm_low"]) == (115, 130, 95)
+
+        await coordinator.async_set_high_alarm(150)
+        await coordinator.async_set_fan_target(120)
+        poll(115.0, 130.0, 95.0)
+        assert coordinator.data["alarm_high"] == 150
+        assert coordinator.data["fan_target"] == 120
+        assert coordinator.fan_target == 120
+
+        sent.clear()
+        poll(200.4273732319118, 220.0, 180.0)
+        assert (coordinator.data["fan_target"], coordinator.data["alarm_high"], coordinator.data["alarm_low"]) == (200, 220, 180)
+        assert coordinator.fan_target == 200
+        assert sent == []
+
+        poll(200.4273732319118, None, "bad")
+        assert (coordinator.data["alarm_high"], coordinator.data["alarm_low"]) == (220, 180)
+
+    asyncio.run(scenario())
+
+
 def test_probe_counts_are_batched_reset_and_do_not_retain_payload(monkeypatch):
     module = _load(monkeypatch)
     monkeypatch.setattr(module, "PROBE_DIAGNOSTICS_SECONDS", 0.02)
