@@ -232,3 +232,54 @@ def test_non_probe_and_unrecognizable_segments_are_not_probe_candidates() -> Non
     ambient = frames.build(0x71, b"\x00\x21", header=b"\x57\xa2\x06")
     frames.parse(b"keepalive" + ambient + b"\xaa\x55\x57\xa2", lambda *args: observed.append(args))
     assert observed == []
+
+
+# --- regression: the h1 header byte is not fixed (A2 vs A4) --------------------
+# Real capture 2026-10-18: the device sent telemetry with h1=0xA4. The old parser
+# pinned h1=0xA2 and rejected every frame, freezing all sensors. These are the
+# exact bytes seen on the wire.
+
+
+def test_decodes_live_a4_header_probe_frame() -> None:
+    """A probe frame with h1=0xA4 (not 0xA2) must decode, not be rejected."""
+    blob = bytes.fromhex("aa5557a4065002000052aa5557a4062006003200dc28d531")
+    assert frames.parse(blob) == [
+        {"type": "probe", "idx": 0, "celsius": 22.0, "battery": 40, "rssi": -43}
+    ]
+
+
+def test_decodes_live_a4_header_ambient_disconnect_and_stand_battery() -> None:
+    assert frames.parse(bytes.fromhex("aa5557a4067102ff0274")) == [
+        {"type": "ambient_disconnect"}
+    ]
+    assert frames.parse(bytes.fromhex("aa5558a40610013c4e")) == [
+        {"type": "stand_battery", "percent": 60}
+    ]
+
+
+@pytest.mark.parametrize("h1", [0xA2, 0xA4, 0xA6, 0x00, 0xFF])
+def test_probe_decodes_regardless_of_h1(h1: int) -> None:
+    """Only the checksum and op/h2 matter; any h1 value decodes the same."""
+    frame = frames.build(0x20, b"\x00\x32\x02\x58\x3c\xaf", header=bytes((0x57, h1, 0x06)))
+    assert frames.parse(frame) == [
+        {"type": "probe", "idx": 0, "celsius": 60.0, "battery": 60, "rssi": -81}
+    ]
+
+
+def test_a4_probe_counts_as_accepted_candidate() -> None:
+    """The diagnostic classifier must count an A4 probe as accepted, not rejected."""
+    observed: list[tuple[int | None, bool, str]] = []
+    frame = frames.build(0x20, b"\x00\x32\x00\xdc\x28\xd5", header=b"\x57\xa4\x06")
+    frames.parse(frame, lambda *args: observed.append(args))
+    assert observed == [(0, True, "accepted")]
+
+
+def test_aa55_inside_payload_is_not_split() -> None:
+    """A payload containing the bytes AA 55 must stay one frame (length-aware)."""
+    # temp low byte 0xAA, battery 0x55 -> the payload holds the sync bytes.
+    frame = frames.build(0x20, b"\x00\x32\x02\xaa\x55\xd5", header=b"\x57\xa4\x06")
+    assert b"\xaa\x55" in frame[7:-1]  # the sync bytes really are inside the payload
+    assert len(frames.split_frames(frame)) == 1
+    assert frames.parse(frame) == [
+        {"type": "probe", "idx": 0, "celsius": 68.2, "battery": 85, "rssi": -43}
+    ]

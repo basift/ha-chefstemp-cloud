@@ -11,10 +11,13 @@ Frame layout (both directions)::
 
 * Downlink (app -> device) header is ``53 81 07``. The third byte MUST be ``07``;
   frames with ``08`` are silently ignored by the device.
-* Uplink (device -> app) telemetry header is ``57 A2 06``; a command echo comes
-  back with ``57 A2 07``. The ``b2`` byte is usually ``57``/``53`` but the stand
-  status frame (op ``10``) uses ``58`` — so decoding keys off ``h1``/``op``, not
-  ``b2``.
+* Uplink (device -> app): ``h2`` (the 5th byte) is ``06`` for telemetry and
+  ``07`` for a command echo. The ``b2`` and ``h1`` bytes are NOT fixed — ``b2`` is
+  ``57`` for most frames but ``58`` for the stand-status frame (op ``10``), and
+  ``h1`` has been observed as both ``A2`` and ``A4`` across sessions. So decoding
+  must NOT pin ``b2``/``h1`` to a constant; integrity is guaranteed by the
+  checksum, and frames are dispatched on ``h2``/``op`` alone. (Pinning ``h1`` to
+  ``A2`` once rejected every frame in an ``A4`` session, freezing the sensors.)
 * ``cksum = (sum(bytes from b2 through the last payload byte) - 1) & 0xFF``.
 """
 
@@ -132,15 +135,26 @@ def _s8(value: int) -> int:
 
 
 def split_frames(data: bytes) -> list[bytes]:
-    """Split a payload into ``AA55``-delimited frames.
+    """Split a payload into frames, length-aware with a resync fallback.
 
-    A single MQTT message (or BLE notification) sometimes concatenates several
-    frames, and may carry trailing ASCII keepalive text; both are handled by
-    slicing on the sync word and letting each decoder read only its own length.
+    A single MQTT message (or BLE notification) may concatenate several frames
+    and carry trailing ASCII keepalive text. A frame's own payload can also
+    contain the bytes ``AA 55`` (e.g. a temperature/battery combination), so
+    slicing naively on the sync word would cut a valid frame in two. Instead,
+    when a candidate at a sync word has a valid checksum for its declared length,
+    it is taken by that length and scanning continues after it; otherwise we fall
+    back to the next sync word so a corrupt or unknown frame cannot desync the
+    rest. The malformed slice is still yielded so callers can see and reject it.
     """
     frames: list[bytes] = []
     i = data.find(_SYNC)
     while i >= 0:
+        if i + 7 <= len(data):
+            end = i + 7 + data[i + 6]  # index of the checksum byte
+            if end < len(data) and _checksum(data[i + 2:end]) == data[end]:
+                frames.append(data[i:end + 1])
+                i = data.find(_SYNC, end + 1)
+                continue
         j = data.find(_SYNC, i + 2)
         frames.append(data[i:] if j < 0 else data[i:j])
         i = j
@@ -151,7 +165,9 @@ def _decode_one(frame: bytes) -> dict[str, Any] | None:
     """Decode a single uplink frame into an event dict, or None."""
     if not verify(frame):
         return None
-    if frame[3] != _H1 or frame[4] not in (_H2_TELEMETRY, _H2_ECHO):
+    # Dispatch on h2 (telemetry vs echo) and op only; b2/h1 are not fixed and the
+    # checksum already guarantees integrity.
+    if frame[4] not in (_H2_TELEMETRY, _H2_ECHO):
         return None
     op = frame[5]
     length = frame[6]
@@ -224,7 +240,8 @@ def parse(
         if (
             on_probe_candidate is not None
             and len(frame) >= 6
-            and frame[3:6] == bytes((_H1, _H2_TELEMETRY, OP_PROBE))
+            and frame[4] == _H2_TELEMETRY
+            and frame[5] == OP_PROBE
         ):
             on_probe_candidate(*_probe_candidate_result(frame))
         if event is not None:
