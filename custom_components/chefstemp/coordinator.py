@@ -320,12 +320,14 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["ambient"] = None
             data["ambient_sample_at"] = None
         elif kind == "fan":
-            # op73 reports the actual motor state (sparse, mainly while running).
+            # op73 is the device's own view of the fan, but it proved unreliable
+            # for on/off (it reported the fan off while it was physically running),
+            # so it only feeds diagnostic attributes. The authoritative on/off
+            # state comes from the command echo (see "fan_echo"), which the device
+            # returns for every command it receives.
             data["fan_enabled"] = event["on"]
             data["fan_running"] = event["on"] and event["strength"] > 0
             data["fan_strength"] = event["strength"]
-            if self._fan_pending is None:
-                data["fan_on"] = event["on"]
         elif kind == "fan_echo":
             # The device confirmed a fan command it received. This is the prompt,
             # authoritative signal of what it applied, so it sets the on/off state
