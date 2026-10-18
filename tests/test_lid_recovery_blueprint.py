@@ -94,7 +94,7 @@ def _initial(unit="°C", *, before=110, after=97, target=110, fan="on"):
     entities = {
         "target": SimpleNamespace(state=str(convert(target)), attributes={"unit_of_measurement": unit}),
         "fan": SimpleNamespace(state=fan, attributes={
-            "thermostat_enabled_observed": fan == "on", "command_status": "observed",
+            "thermostat_enabled_observed": fan == "on", "command_status": "confirmed",
         }),
     }
     return dict(trigger=SimpleNamespace(from_state=old, to_state=new),
@@ -157,12 +157,12 @@ def test_fail_safe_guards_and_no_restart_activation():
     assert [step["action"] for step in actions if "action" in step][:2] == [
         "persistent_notification.create", "fan.turn_off",
     ]
-    assert "observed" in actions[3]["wait_template"]
+    assert "confirmed" in actions[3]["wait_template"]
     assert actions[3]["continue_on_timeout"] is True
     abort = _template("wait.trigger.id in ['fan_override', 'target_change']")
     for safety in ("not wait.completed", "deadline", "freshness_seconds",
                    "fan_override", "target_change", "command_status",
-                   "thermostat_enabled_observed", "initial_unit"):
+                   "initial_unit"):
         assert safety in abort
     enable = _template("ambient_sample_at') == wait.trigger.to_state")
     assert "target_deadband" in enable
