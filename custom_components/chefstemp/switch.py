@@ -47,7 +47,7 @@ class ChefsTempBluetoothSwitch(ChefsTempEntity, SwitchEntity):
     @property
     def is_on(self) -> bool:
         """Whether HA is allowed to hold the stand's local BLE link."""
-        return self.coordinator.ble_enabled
+        return bool(self.coordinator.ble_enabled)
 
     @property
     def available(self) -> bool:
