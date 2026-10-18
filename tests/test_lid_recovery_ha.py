@@ -122,13 +122,13 @@ def test_offline_ha_script_acts_only_after_recovery_then_stall(monkeypatch, unit
                 enabled = service == "turn_on"
                 hass.states.async_set(fan, "on" if enabled else "off", {
                     "thermostat_enabled_observed": enabled,
-                    "command_status": "observed",
+                    "command_status": "confirmed",
                 })
 
         monkeypatch.setattr(type(hass.services), "async_call", mocked_call)
         hass.states.async_set(target, str(to_unit(110)), {"unit_of_measurement": unit})
         hass.states.async_set(fan, "on", {
-            "thermostat_enabled_observed": True, "command_status": "observed",
+            "thermostat_enabled_observed": True, "command_status": "confirmed",
         })
         ambient(110)
         before = hass.states.get(sensor)
@@ -174,7 +174,7 @@ def test_offline_ha_script_acts_only_after_recovery_then_stall(monkeypatch, unit
                 hass.states.async_set(target, str(to_unit(111)), {"unit_of_measurement": unit})
             elif scenario == "manual_override":
                 hass.states.async_set(fan, "on", {
-                    "thermostat_enabled_observed": True, "command_status": "observed",
+                    "thermostat_enabled_observed": True, "command_status": "confirmed",
                 })
             elif scenario == "unavailable":
                 ambient(95, available=False)

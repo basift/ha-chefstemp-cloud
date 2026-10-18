@@ -164,7 +164,6 @@ conditions:
          and (before.state | float - target | float) | abs <= near_target_margin | float * factor
          and (after.state | float) < (target | float - target_deadband | float * factor)
          and is_state(fan_entity, 'on')
-         and state_attr(fan_entity, 'thermostat_enabled_observed') is sameas true
          and state_attr(fan_entity, 'command_status') != 'pending' }}
 
 actions:
@@ -194,8 +193,7 @@ actions:
     continue_on_error: true
   - wait_template: >-
       {{ is_state(fan_entity, 'off')
-         and state_attr(fan_entity, 'command_status') == 'observed'
-         and state_attr(fan_entity, 'thermostat_enabled_observed') is sameas false }}
+         and state_attr(fan_entity, 'command_status') == 'confirmed' }}
     timeout:
       seconds: 20
     continue_on_timeout: true
@@ -235,8 +233,7 @@ actions:
                    or as_timestamp(now()) - last_ts | float > freshness_seconds | float
                    or wait.trigger.id in ['fan_override', 'target_change']
                    or not is_state(fan_entity, 'off')
-                   or state_attr(fan_entity, 'command_status') != 'observed'
-                   or state_attr(fan_entity, 'thermostat_enabled_observed') is not sameas false
+                   or state_attr(fan_entity, 'command_status') != 'confirmed'
                    or not is_number(states(target_entity))
                    or states(target_entity) | float != initial_target | float
                    or state_attr(target_entity, 'unit_of_measurement') != initial_unit
@@ -321,8 +318,7 @@ actions:
                             - condition: template
                               value_template: >-
                                 {{ is_state(fan_entity, 'off')
-                                   and state_attr(fan_entity, 'command_status') == 'observed'
-                                   and state_attr(fan_entity, 'thermostat_enabled_observed') is sameas false
+                                   and state_attr(fan_entity, 'command_status') == 'confirmed'
                                    and is_number(states(target_entity))
                                    and states(target_entity) | float == initial_target | float
                                    and state_attr(target_entity, 'unit_of_measurement') == initial_unit
@@ -337,8 +333,7 @@ actions:
                               continue_on_error: true
                             - wait_template: >-
                                 {{ is_state(fan_entity, 'on')
-                                   and state_attr(fan_entity, 'command_status') == 'observed'
-                                   and state_attr(fan_entity, 'thermostat_enabled_observed') is sameas true }}
+                                   and state_attr(fan_entity, 'command_status') == 'confirmed' }}
                               timeout:
                                 seconds: 20
                               continue_on_timeout: true
