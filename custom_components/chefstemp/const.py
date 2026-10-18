@@ -20,6 +20,14 @@ MQTT_USERNAME_PREFIX: Final = "Android_"
 
 CONF_DEVICE_MAC: Final = "device_mac"
 CONF_DEVICE_NAME: Final = "device_name"
+CONF_BLE_MAC: Final = "ble_mac"
+
+# Local BLE (GATT) to the stand. Same AA55 frames as the cloud, byte-identical.
+# The stand advertises a random-static address; its fff0 service carries the
+# telemetry notify characteristic and the command write characteristic.
+BLE_SERVICE_UUID: Final = "0000fff0-0000-1000-8000-00805f9b34fb"
+BLE_NOTIFY_UUID: Final = "0783b03e-8535-b5a0-7140-a304d2495cb8"
+BLE_WRITE_UUID: Final = "0783b03e-8535-b5a0-7140-a304d2495cba"
 
 # Live temperatures arrive by MQTT push; the poll only refreshes metadata
 # (alarm setpoints, fan target, device presence) and re-authenticates. It is

@@ -35,7 +35,8 @@ def test_probe_diagnostics_entity_exists_without_probe_sensor() -> None:
     asyncio.run(sensor.async_setup_entry(None, entry, batches.append))
     entities = list(batches[0])
     assert {entity.entity_description.key for entity in entities} == {
-        "ambient", "stand_battery", "probe_frames", "probe_rejections", "probe_last_rejection"
+        "ambient", "stand_battery", "connection_source",
+        "probe_frames", "probe_rejections", "probe_last_rejection"
     }
     diagnostic = next(entity for entity in entities if entity.entity_description.key == "probe_frames")
     assert diagnostic.native_value == 0

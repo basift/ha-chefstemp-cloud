@@ -12,7 +12,7 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import ChefsTempApi, ChefsTempAuthError, ChefsTempError
-from .const import CONF_DEVICE_MAC, CONF_DEVICE_NAME, DOMAIN
+from .const import CONF_BLE_MAC, CONF_DEVICE_MAC, CONF_DEVICE_NAME, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -105,6 +105,7 @@ class ChefsTempConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
                 CONF_PASSWORD: self._password,
                 CONF_DEVICE_MAC: device["mac"],
                 CONF_DEVICE_NAME: device["name"],
+                CONF_BLE_MAC: device.get("ble_mac"),
             },
         )
 

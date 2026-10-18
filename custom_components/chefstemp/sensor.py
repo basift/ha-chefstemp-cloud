@@ -52,6 +52,14 @@ STAND_SENSORS: tuple[ChefsTempSensorDescription, ...] = (
         value_fn=lambda data: data.get("stand_battery"),
     ),
     ChefsTempSensorDescription(
+        key="connection_source",
+        translation_key="connection_source",
+        device_class=SensorDeviceClass.ENUM,
+        options=["ble", "cloud", "disconnected"],
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda data: data.get("connection_source"),
+    ),
+    ChefsTempSensorDescription(
         key="probe_frames",
         translation_key="probe_frames",
         entity_category=EntityCategory.DIAGNOSTIC,

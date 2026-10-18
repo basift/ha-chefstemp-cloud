@@ -44,8 +44,9 @@ def _load(monkeypatch):
     monkeypatch.setitem(sys.modules, spec.name, frames)
     spec.loader.exec_module(frames)
     stub("custom_components.chefstemp.api", ChefsTempApi=object, ChefsTempAuthError=type("AuthError", (Exception,), {}), ChefsTempError=type("ApiError", (Exception,), {}))
-    stub("custom_components.chefstemp.const", CONF_DEVICE_MAC="mac", DEFAULT_SCAN_INTERVAL=60, DOMAIN="chefstemp")
+    stub("custom_components.chefstemp.const", CONF_BLE_MAC="ble_mac", CONF_DEVICE_MAC="mac", DEFAULT_SCAN_INTERVAL=60, DOMAIN="chefstemp")
     stub("custom_components.chefstemp.mqtt", CloudMqttTransport=object)
+    stub("custom_components.chefstemp.ble", BleManager=object)
     spec = importlib.util.spec_from_file_location("custom_components.chefstemp.coordinator", root / "coordinator.py")
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
@@ -72,9 +73,10 @@ def test_valid_probe_frames_route_to_their_own_temperature_sensors(monkeypatch):
         state_class: str | None = None
         entity_category: str | None = None
         entity_registry_enabled_default: bool = True
+        options: list | None = None
 
     stub("homeassistant.components", __path__=[])
-    stub("homeassistant.components.sensor", SensorDeviceClass=SimpleNamespace(TEMPERATURE="temperature", BATTERY="battery", SIGNAL_STRENGTH="signal"), SensorEntity=object, SensorEntityDescription=Description, SensorStateClass=SimpleNamespace(MEASUREMENT="measurement"))
+    stub("homeassistant.components.sensor", SensorDeviceClass=SimpleNamespace(TEMPERATURE="temperature", BATTERY="battery", SIGNAL_STRENGTH="signal", ENUM="enum"), SensorEntity=object, SensorEntityDescription=Description, SensorStateClass=SimpleNamespace(MEASUREMENT="measurement"))
     stub("homeassistant.const", PERCENTAGE="%", SIGNAL_STRENGTH_DECIBELS_MILLIWATT="dBm", EntityCategory=SimpleNamespace(DIAGNOSTIC="diagnostic"), UnitOfTemperature=SimpleNamespace(CELSIUS="°C"))
     stub("homeassistant.helpers.entity_registry")
     stub("homeassistant.helpers.entity_platform", AddConfigEntryEntitiesCallback=object)

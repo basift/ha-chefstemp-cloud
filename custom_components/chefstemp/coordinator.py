@@ -24,7 +24,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from . import frames
 from .api import ChefsTempApi, ChefsTempAuthError, ChefsTempError
-from .const import CONF_DEVICE_MAC, DEFAULT_SCAN_INTERVAL, DOMAIN
+from .ble import BleManager
+from .const import CONF_BLE_MAC, CONF_DEVICE_MAC, DEFAULT_SCAN_INTERVAL, DOMAIN
 from .mqtt import CloudMqttTransport
 
 _LOGGER = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ PROBE_DIAGNOSTICS_SECONDS = 60
 def _empty_state() -> dict[str, Any]:
     return {
         "available": False,
+        "connection_source": "disconnected",
         "ambient": None,
         "ambient_sample_at": None,
         "fan_on": False,
@@ -87,6 +89,8 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.device_mac = entry.data[CONF_DEVICE_MAC]
         self.device_name = entry.title
         self.push_connected = False
+        self.ble_connected = False
+        self.ble_mac: str | None = entry.data.get(CONF_BLE_MAC)
         self.temperature_unit_override: str | None = None
 
         # Fan setpoint state HA owns and rebuilds full op20 frames from.
@@ -107,7 +111,17 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._probe_diagnostics_timer: asyncio.TimerHandle | None = None
 
         self._transport: CloudMqttTransport | None = None
+        self._ble: BleManager | None = None
         self.data = _empty_state()
+
+    @property
+    def connection_source(self) -> str:
+        """Which channel is currently carrying telemetry/commands."""
+        if self.ble_connected:
+            return "ble"
+        if self.push_connected:
+            return "cloud"
+        return "disconnected"
 
     # ------------------------------------------------------------------
     # Polling (metadata only)
@@ -129,6 +143,9 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data["available"] = device is not None
         if device is not None:
             self._sync_from_cloud(device, data)
+            if not self.ble_mac and device.get("ble_mac"):
+                self.ble_mac = str(device["ble_mac"])
+            self._maybe_start_ble()
         return data
 
     def _sync_from_cloud(self, device: dict[str, Any], data: dict[str, Any]) -> None:
@@ -162,7 +179,7 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ------------------------------------------------------------------
 
     async def async_start_push(self) -> None:
-        """Open the MQTT channel for this stand."""
+        """Open the cloud channel, and the local BLE channel when reachable."""
         self._transport = CloudMqttTransport(
             email=self.api.email or "",
             device_mac=self.device_mac,
@@ -170,6 +187,34 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             on_connect_change=self._threadsafe(self._handle_connect_change),
         )
         await self.hass.async_add_executor_job(self._transport.connect)
+        self._maybe_start_ble()
+
+    @callback
+    def _maybe_start_ble(self) -> None:
+        """Start the local BLE manager once the stand's BLE address is known.
+
+        BLE is the preferred, cloud-independent path when the stand is in range
+        of a Home Assistant Bluetooth adapter or proxy; it runs alongside the
+        cloud channel, which stays connected as a fallback.
+        """
+        if self._ble is not None or not self.ble_mac:
+            return
+        self._ble = BleManager(
+            self.hass,
+            address=self.ble_mac,
+            name=self.device_name,
+            on_frame=self._handle_frame,  # bleak callbacks already run on the loop
+            on_connect_change=self._handle_ble_connect_change,
+        )
+        self._ble.async_start()
+
+    @callback
+    def _handle_ble_connect_change(self, connected: bool) -> None:
+        self.ble_connected = connected
+        # Surface the source change immediately on the existing state.
+        data = dict(self.data)
+        data["connection_source"] = self.connection_source
+        self.async_set_updated_data(data)
 
     def _threadsafe(self, func):
         """Wrap a callback so paho's thread can invoke it on the event loop."""
@@ -184,6 +229,9 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.push_connected = connected
         if not connected and self._fan_pending is not None:
             self._finish_fan_command(False)
+        data = dict(self.data)
+        data["connection_source"] = self.connection_source
+        self.async_set_updated_data(data)
 
     @callback
     def _handle_frame(self, payload: bytes) -> None:
@@ -290,7 +338,13 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ------------------------------------------------------------------
 
     async def _async_send(self, frame: bytes) -> None:
-        """Send one command frame over the active transport."""
+        """Send one command frame, preferring the local BLE link over the cloud."""
+        if self._ble is not None and self._ble.connected:
+            try:
+                await self._ble.async_send(frame)
+                return
+            except Exception as err:
+                _LOGGER.debug("ChefsTemp BLE send failed, using cloud: %s", err)
         if self._transport is None:
             raise UpdateFailed("No transport is connected")
         await self.hass.async_add_executor_job(self._transport.send, frame)
@@ -315,7 +369,7 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except BaseException:
                 self._finish_fan_command(False)
                 raise
-            if self.push_connected and self._fan_pending is on:
+            if (self.push_connected or self.ble_connected) and self._fan_pending is on:
                 self._fan_timer = self.hass.loop.call_later(
                     FAN_RECONCILE_SECONDS, self._expire_fan_command
                 )
@@ -374,11 +428,14 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.async_set_updated_data(data)
 
     async def async_shutdown(self) -> None:
-        """Close the MQTT channel."""
+        """Close the BLE and MQTT channels."""
         self._cancel_fan_timer()
         if self._probe_diagnostics_timer is not None:
             self._probe_diagnostics_timer.cancel()
             self._probe_diagnostics_timer = None
+        if self._ble is not None:
+            await self._ble.async_stop()
+            self._ble = None
         if self._transport is not None:
             await self.hass.async_add_executor_job(self._transport.disconnect)
             self._transport = None

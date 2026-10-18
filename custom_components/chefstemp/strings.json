@@ -40,6 +40,10 @@
     "sensor": {
       "ambient": { "name": "Grill temperature" },
       "stand_battery": { "name": "Stand battery" },
+      "connection_source": {
+        "name": "Connection source",
+        "state": { "ble": "Bluetooth", "cloud": "Cloud", "disconnected": "Disconnected" }
+      },
       "probe_frames": { "name": "Probe frame candidates since load" },
       "probe_rejections": { "name": "Probe frame rejections since load" },
       "probe_last_rejection": { "name": "Last probe frame rejection" },
