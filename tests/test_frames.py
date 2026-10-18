@@ -185,12 +185,25 @@ def test_roundtrip_fan_command_target_survives() -> None:
     assert int.from_bytes(payload[4:6], "big") == 175
 
 
-def test_fan_echo_cannot_create_probe_but_real_probe_survives() -> None:
-    """The op20 echo payload is a command, not a probe reading."""
+def test_fan_echo_decodes_as_fan_echo_not_probe() -> None:
+    """The op20 echo is a command confirmation (fan_echo), never a probe reading."""
     echo = frames.build(0x20, frames.fan_on(175)[7:-1], header=bytes((0x57, 0xA2, 0x07)))
     probe = bytes.fromhex("aa5557a2062006003200f028af1d")
     assert frames.parse(echo + probe) == [
-        {"type": "probe", "idx": 0, "celsius": 24.0, "battery": 40, "rssi": -81}
+        {"type": "fan_echo", "mode": 2, "on": True, "target": 175, "strength": 2},
+        {"type": "probe", "idx": 0, "celsius": 24.0, "battery": 40, "rssi": -81},
+    ]
+
+
+def test_decodes_live_fan_echo_off_and_on() -> None:
+    """Real captured fan echoes (h1=0xA4) confirm the applied mode and target."""
+    # OFF echo captured 2026-10-18: op20 h2=07, payload 09 00 0dbd 00c8 02.
+    assert frames.parse(bytes.fromhex("aa5557a407200709000dbd00c802c5")) == [
+        {"type": "fan_echo", "mode": 0, "on": False, "target": 200, "strength": 2}
+    ]
+    on_echo = frames.build(0x20, bytes.fromhex("09020dbd00e602"), header=b"\x57\xa4\x07")
+    assert frames.parse(on_echo) == [
+        {"type": "fan_echo", "mode": 2, "on": True, "target": 230, "strength": 2}
     ]
 
 

@@ -123,13 +123,23 @@ def test_ambient_updates_do_not_refresh_or_clear_cached_probe(monkeypatch):
         loop.close()
 
 
-def test_off_reconciles_stale_on_then_fresh_on_and_observed_off(monkeypatch):
+def _fan_echo(module, on, target=200, strength=2):
+    """Build the uplink command echo the device returns for a fan command."""
+    mode = module.frames.FAN_ON if on else module.frames.FAN_OFF
+    payload = (
+        bytes((0x09, mode))
+        + (0x0DBD).to_bytes(2, "big")
+        + int(target).to_bytes(2, "big")
+        + bytes((strength,))
+    )
+    return module.frames.build(0x20, payload, header=b"\x57\xa2\x07")
+
+
+def test_fan_command_is_confirmed_by_the_device_echo(monkeypatch):
     module = _load(monkeypatch)
-    monkeypatch.setattr(module, "FAN_RECONCILE_SECONDS", 0.02)
 
     async def scenario():
-        hass = SimpleNamespace(loop=asyncio.get_running_loop())
-        coordinator = module.ChefsTempCoordinator(hass, SimpleNamespace(data={"mac": "unused"}, title="stand"), SimpleNamespace())
+        coordinator = module.ChefsTempCoordinator(SimpleNamespace(loop=asyncio.get_running_loop()), SimpleNamespace(data={"mac": "unused"}, title="stand"), SimpleNamespace())
         coordinator.push_connected = True
         coordinator._transport = SimpleNamespace()
 
@@ -142,54 +152,78 @@ def test_off_reconciles_stale_on_then_fresh_on_and_observed_off(monkeypatch):
         await coordinator.async_set_fan(False)
         assert coordinator.data["fan_on"] is False
         assert coordinator.data["fan_command_status"] == "pending"
+        # A sparse op73 does NOT resolve the command — only the echo does.
         coordinator._handle_frame(module.frames.build(0x73, b"\x04\x01\x09\x02\x02", header=b"\x57\xa2\x06"))
+        assert coordinator.data["fan_command_status"] == "pending"
         assert coordinator.data["fan_on"] is False
-        await asyncio.sleep(0.04)
-        assert coordinator.data["fan_on"] is True
-        assert coordinator.data["fan_command_status"] == "unconfirmed"
-        coordinator._handle_frame(module.frames.build(0x73, b"\x04\x01\x09\x00\x00", header=b"\x57\xa2\x06"))
+        # The device echoes the OFF command: confirmed.
+        coordinator._handle_frame(_fan_echo(module, False))
         assert coordinator.data["fan_on"] is False
-        await coordinator.async_set_fan(False)
-        coordinator._handle_frame(module.frames.build(0x73, b"\x04\x01\x09\x00\x00", header=b"\x57\xa2\x06"))
-        await asyncio.sleep(0.04)
-        assert coordinator.data["fan_command_status"] == "observed"
-        assert coordinator.data["fan_running"] is False
+        assert coordinator.data["fan_command_status"] == "confirmed"
 
     asyncio.run(scenario())
 
 
-def test_matching_fan_telemetry_during_send_is_observed(monkeypatch):
+def test_fan_command_without_echo_retries_then_unconfirmed(monkeypatch):
     module = _load(monkeypatch)
-    monkeypatch.setattr(module, "FAN_RECONCILE_SECONDS", 0.02)
+    monkeypatch.setattr(module, "FAN_ECHO_TIMEOUT", 0.02)
+    monkeypatch.setattr(module, "FAN_MAX_RETRIES", 2)
 
     async def scenario():
-        coordinator = module.ChefsTempCoordinator(SimpleNamespace(loop=asyncio.get_running_loop()), SimpleNamespace(data={"mac": "unused"}, title="stand"), SimpleNamespace())
+        loop = asyncio.get_running_loop()
+        coordinator = module.ChefsTempCoordinator(SimpleNamespace(loop=loop), SimpleNamespace(data={"mac": "unused"}, title="stand"), SimpleNamespace())
+        coordinator.config_entry = SimpleNamespace(
+            async_create_background_task=lambda hass, coro, name=None: loop.create_task(coro)
+        )
         coordinator.push_connected = True
         coordinator._transport = SimpleNamespace()
-        started = asyncio.Event()
-        release = asyncio.Event()
+        sends = []
 
         async def send(frame):
-            assert frame[8] == module.frames.FAN_OFF
-            started.set()
-            await release.wait()
+            sends.append(frame)
 
         coordinator._async_send = send
-        task = asyncio.create_task(coordinator.async_set_fan(False))
-        await started.wait()
-        coordinator._handle_frame(module.frames.build(0x73, b"\x04\x01\x09\x00\x00", header=b"\x57\xa2\x06"))
-        assert coordinator.data["fan_command_status"] == "pending"
-        release.set()
-        await task
-        await asyncio.sleep(0.04)
-        assert coordinator.data["fan_on"] is False
-        assert coordinator.data["fan_command_status"] == "observed"
+        await coordinator.async_set_fan(True)
+        await asyncio.sleep(0.25)
+        # Initial send plus FAN_MAX_RETRIES re-sends, then given up as unconfirmed.
+        assert len(sends) == 1 + module.FAN_MAX_RETRIES
+        assert coordinator.data["fan_command_status"] == "unconfirmed"
+
+    asyncio.run(scenario())
+
+
+def test_echo_resolves_a_pending_retry_before_giving_up(monkeypatch):
+    module = _load(monkeypatch)
+    monkeypatch.setattr(module, "FAN_ECHO_TIMEOUT", 0.03)
+    monkeypatch.setattr(module, "FAN_MAX_RETRIES", 3)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        coordinator = module.ChefsTempCoordinator(SimpleNamespace(loop=loop), SimpleNamespace(data={"mac": "unused"}, title="stand"), SimpleNamespace())
+        coordinator.config_entry = SimpleNamespace(
+            async_create_background_task=lambda hass, coro, name=None: loop.create_task(coro)
+        )
+        coordinator.push_connected = True
+        coordinator._transport = SimpleNamespace()
+        sends = []
+
+        async def send(frame):
+            sends.append(frame)
+
+        coordinator._async_send = send
+        await coordinator.async_set_fan(True)
+        await asyncio.sleep(0.05)  # let one retry happen
+        coordinator._handle_frame(_fan_echo(module, True))
+        assert coordinator.data["fan_command_status"] == "confirmed"
+        before = len(sends)
+        await asyncio.sleep(0.1)  # no further retries after confirmation
+        assert len(sends) == before
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("disconnect", [False, True])
-def test_failed_or_disconnected_publish_does_not_claim_success(monkeypatch, disconnect):
+def test_failed_or_disconnected_send_is_not_claimed_confirmed(monkeypatch, disconnect):
     module = _load(monkeypatch)
 
     async def scenario():
@@ -199,25 +233,25 @@ def test_failed_or_disconnected_publish_does_not_claim_success(monkeypatch, disc
 
         async def send(frame):
             if disconnect:
-                coordinator._handle_connect_change(False)
+                coordinator.push_connected = False
+                coordinator.ble_connected = False
             else:
                 raise RuntimeError("publish failed")
 
         coordinator._async_send = send
         if disconnect:
             await coordinator.async_set_fan(True)
+            assert coordinator.data["fan_command_status"] == "unconfirmed"
         else:
             with pytest.raises(RuntimeError, match="publish failed"):
                 await coordinator.async_set_fan(True)
-        assert coordinator.data["fan_on"] is False
-        assert coordinator.data["fan_command_status"] == "unconfirmed"
+            assert coordinator.data["fan_command_status"] == "failed"
 
     asyncio.run(scenario())
 
 
-def test_latest_command_wins_and_idle_thermostat_is_enabled(monkeypatch):
+def test_latest_fan_command_wins_and_idle_thermostat_reads_not_running(monkeypatch):
     module = _load(monkeypatch)
-    monkeypatch.setattr(module, "FAN_RECONCILE_SECONDS", 0.02)
 
     async def scenario():
         coordinator = module.ChefsTempCoordinator(SimpleNamespace(loop=asyncio.get_running_loop()), SimpleNamespace(data={"mac": "unused"}, title="stand"), SimpleNamespace())
@@ -241,9 +275,9 @@ def test_latest_command_wins_and_idle_thermostat_is_enabled(monkeypatch):
         await asyncio.gather(on, off)
         assert sent == [module.frames.FAN_ON, module.frames.FAN_OFF]
         assert coordinator.data["fan_on"] is False
-        coordinator._handle_frame(module.frames.build(0x73, b"\x04\x01\x09\x00\x00", header=b"\x57\xa2\x06"))
-        await asyncio.sleep(0.04)
-        assert coordinator.data["fan_command_status"] == "observed"
+        coordinator._handle_frame(_fan_echo(module, False))
+        assert coordinator.data["fan_command_status"] == "confirmed"
+        # Enabled thermostat idling (strength 0) reads enabled but not running.
         await coordinator.async_set_fan(True)
         coordinator._handle_frame(module.frames.build(0x73, b"\x04\x01\x09\x02\x00", header=b"\x57\xa2\x06"))
         assert coordinator.data["fan_on"] is True

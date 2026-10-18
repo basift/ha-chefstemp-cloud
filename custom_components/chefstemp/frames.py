@@ -191,6 +191,18 @@ def _decode_one(frame: bytes) -> dict[str, Any] | None:
             "rssi": _s8(payload[5]),
         }
 
+    if op == OP_FAN_SET and frame[4] == _H2_ECHO and length >= 7 and payload[0] == 0x09:
+        # Command echo: the device confirms it received and applied a fan command
+        # (op20 <09 mode sec16 target16 strength>). Arrives within ~1s of the
+        # write, so it is a reliable per-command delivery confirmation.
+        return {
+            "type": "fan_echo",
+            "mode": payload[1],
+            "on": payload[1] == FAN_ON,
+            "target": int.from_bytes(payload[4:6], "big"),
+            "strength": payload[6],
+        }
+
     if op == OP_FAN_STATE and length >= 2:
         # <moduleMAC 6> 04 01 09 <mode> <strength>
         return {

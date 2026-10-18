@@ -33,7 +33,12 @@ _LOGGER = logging.getLogger(__name__)
 type ChefsTempConfigEntry = ConfigEntry["ChefsTempCoordinator"]
 
 DEFAULT_FAN_TARGET = 110
-FAN_RECONCILE_SECONDS = 5
+# A fan command is confirmed by the device's own echo (op20, h2=07), which comes
+# back within ~1s. If no echo arrives in this window the command may have been
+# lost, so it is re-sent (idempotent) up to FAN_MAX_RETRIES times before being
+# marked unconfirmed — more reliable than waiting for the sparse op73 fan-state.
+FAN_ECHO_TIMEOUT = 4.0
+FAN_MAX_RETRIES = 2
 PROBE_DIAGNOSTICS_SECONDS = 60
 
 
@@ -102,7 +107,8 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._fan_lock = asyncio.Lock()
         self._fan_pending: bool | None = None
         self._fan_timer: asyncio.TimerHandle | None = None
-        self._fan_seen_matching = False
+        self._fan_frame: bytes | None = None
+        self._fan_retries = 0
         # Bounded by the one-byte probe index; None groups truncated candidates.
         self._probe_frame_counts: dict[int | None, list[int]] = {0: [0, 0]}
         self._probe_rejection_counts: dict[int | None, dict[str, int]] = {0: {}}
@@ -227,8 +233,8 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @callback
     def _handle_connect_change(self, connected: bool) -> None:
         self.push_connected = connected
-        if not connected and self._fan_pending is not None:
-            self._finish_fan_command(False)
+        # A pending fan command is resolved by the echo-timeout/retry logic, which
+        # fails it if neither channel is up — no special handling needed here.
         data = dict(self.data)
         data["connection_source"] = self.connection_source
         self.async_set_updated_data(data)
@@ -314,13 +320,19 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["ambient"] = None
             data["ambient_sample_at"] = None
         elif kind == "fan":
+            # op73 reports the actual motor state (sparse, mainly while running).
             data["fan_enabled"] = event["on"]
             data["fan_running"] = event["on"] and event["strength"] > 0
             data["fan_strength"] = event["strength"]
             if self._fan_pending is None:
                 data["fan_on"] = event["on"]
-            else:
-                self._fan_seen_matching = event["on"] == self._fan_pending
+        elif kind == "fan_echo":
+            # The device confirmed a fan command it received. This is the prompt,
+            # authoritative signal of what it applied, so it sets the on/off state
+            # and resolves a pending command (confirming delivery).
+            data["fan_on"] = event["on"]
+            if self._fan_pending is not None and event["on"] == self._fan_pending:
+                self._confirm_fan_command(data)
         elif kind == "stand_battery":
             data["stand_battery"] = event["percent"]
         elif kind == "probe":
@@ -350,56 +362,96 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.hass.async_add_executor_job(self._transport.send, frame)
 
     async def async_set_fan(self, on: bool) -> None:
-        """Enable the fan thermostat, or force it off."""
+        """Enable the fan thermostat, or force it off, confirmed by the device echo."""
         async with self._fan_lock:
-            frame = (
+            self._fan_frame = (
                 frames.fan_on(self.fan_target, self.fan_strength, self.fan_seconds)
                 if on
                 else frames.fan_off(self.fan_target, self.fan_strength, self.fan_seconds)
             )
             self._cancel_fan_timer()
             self._fan_pending = on
-            self._fan_seen_matching = False
+            self._fan_retries = 0
             data = dict(self.data)
             data["fan_on"] = on
             data["fan_command_status"] = "pending"
             self.async_set_updated_data(data)
             try:
-                await self._async_send(frame)
+                await self._async_send(self._fan_frame)
             except BaseException:
-                self._finish_fan_command(False)
+                self._fail_fan_command()
                 raise
-            if (self.push_connected or self.ble_connected) and self._fan_pending is on:
-                self._fan_timer = self.hass.loop.call_later(
-                    FAN_RECONCILE_SECONDS, self._expire_fan_command
-                )
-            elif self._fan_pending is not None:
-                self._finish_fan_command(False)
+            self._arm_fan_timer()
 
     def _cancel_fan_timer(self) -> None:
         if self._fan_timer is not None:
             self._fan_timer.cancel()
             self._fan_timer = None
 
-    @callback
-    def _expire_fan_command(self) -> None:
-        self._finish_fan_command(self._fan_seen_matching)
+    def _arm_fan_timer(self) -> None:
+        """Wait for the device's echo; retry on silence, then give up."""
+        self._cancel_fan_timer()
+        if self._fan_pending is None:
+            return
+        if not (self.push_connected or self.ble_connected):
+            # No channel to receive the echo on; the command may still have been
+            # sent, so mark it unconfirmed rather than failed.
+            self._fan_pending = None
+            data = dict(self.data)
+            data["fan_command_status"] = "unconfirmed"
+            self.async_set_updated_data(data)
+            return
+        self._fan_timer = self.hass.loop.call_later(
+            FAN_ECHO_TIMEOUT, self._on_fan_echo_timeout
+        )
 
     @callback
-    def _finish_fan_command(
-        self, observed: bool, data: dict[str, Any] | None = None
-    ) -> None:
-        """Resolve the optimistic overlay on observation, timeout or disconnect."""
+    def _confirm_fan_command(self, data: dict[str, Any]) -> None:
+        """A matching echo arrived: the command was delivered and applied."""
         self._cancel_fan_timer()
-        desired = self._fan_pending
         self._fan_pending = None
-        state = data if data is not None else dict(self.data)
-        state["fan_on"] = state["fan_enabled"] if state["fan_enabled"] is not None else False
-        state["fan_command_status"] = (
-            "observed" if observed and state["fan_enabled"] == desired else "unconfirmed"
-        )
-        if data is None:
-            self.async_set_updated_data(state)
+        self._fan_retries = 0
+        data["fan_command_status"] = "confirmed"
+
+    @callback
+    def _on_fan_echo_timeout(self) -> None:
+        """No echo within the window: re-send, or give up after the retries."""
+        self._fan_timer = None
+        if self._fan_pending is None:
+            return
+        if self._fan_retries < FAN_MAX_RETRIES:
+            self._fan_retries += 1
+            data = dict(self.data)
+            data["fan_command_status"] = "retrying"
+            self.async_set_updated_data(data)
+            self.config_entry.async_create_background_task(
+                self.hass, self._async_resend_fan(), name=f"{DOMAIN}-fan-retry"
+            )
+        else:
+            data = dict(self.data)
+            data["fan_command_status"] = "unconfirmed"
+            self.async_set_updated_data(data)
+            self._fan_pending = None
+
+    async def _async_resend_fan(self) -> None:
+        """Re-send the pending fan command (idempotent) and await the echo again."""
+        async with self._fan_lock:
+            if self._fan_pending is None or self._fan_frame is None:
+                return
+            try:
+                await self._async_send(self._fan_frame)
+            except Exception as err:
+                _LOGGER.debug("ChefsTemp fan retry send failed: %s", err)
+            self._arm_fan_timer()
+
+    @callback
+    def _fail_fan_command(self) -> None:
+        """Mark the command failed when it could not be sent at all."""
+        self._cancel_fan_timer()
+        self._fan_pending = None
+        data = dict(self.data)
+        data["fan_command_status"] = "failed"
+        self.async_set_updated_data(data)
 
     async def async_set_fan_target(self, target_c: int) -> None:
         """Change the fan setpoint; re-apply immediately if the fan is on."""
