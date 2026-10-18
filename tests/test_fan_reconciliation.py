@@ -414,3 +414,53 @@ def test_repeated_equal_ambient_frames_advance_only_mqtt_sample_timestamp(monkey
     assert coordinator.data["ambient_sample_at"] > first
     coordinator._apply_event({"type": "stand_battery", "percent": 50}, coordinator.data)
     assert coordinator.data["ambient_sample_at"] == "2026-09-29T12:01:00+00:00"
+
+
+def test_bluetooth_switch_releases_and_re_enables_local_ble(monkeypatch):
+    """Releasing BLE stops the manager and suspends reconnects; enabling restores it."""
+    module = _load(monkeypatch)
+
+    class FakeBle:
+        def __init__(self, hass, address, name, on_frame, on_connect_change):
+            self.started = True
+
+        def async_start(self):
+            self.started = True
+
+        async def async_stop(self):
+            self.started = False
+
+    monkeypatch.setattr(module, "BleManager", FakeBle)
+    loop = asyncio.new_event_loop()
+    try:
+        coordinator = module.ChefsTempCoordinator(
+            SimpleNamespace(loop=loop),
+            SimpleNamespace(data={"mac": "unused", "ble_mac": "C0:00:11:22:AC:53"}, title="stand"),
+            SimpleNamespace(),
+        )
+        # Enabled by default; bring up the local manager like setup would.
+        assert coordinator.ble_enabled is True
+        assert coordinator.ble_resume_at is None
+        coordinator._maybe_start_ble()
+        assert coordinator._ble is not None and coordinator._ble.started
+
+        # Releasing hands the single slot over: manager stopped, disabled, resume armed.
+        loop.run_until_complete(coordinator.async_release_ble(seconds=300))
+        assert coordinator.ble_enabled is False
+        assert coordinator._ble is None
+        assert coordinator.ble_resume_at is not None
+        assert coordinator._ble_resume_handle is not None
+        assert coordinator.data["connection_source"] == "disconnected"
+
+        # A routine poll must not restart BLE while it is released.
+        coordinator._maybe_start_ble()
+        assert coordinator._ble is None
+
+        # Re-enabling cancels the timer and brings the manager back.
+        loop.run_until_complete(coordinator.async_enable_ble())
+        assert coordinator.ble_enabled is True
+        assert coordinator.ble_resume_at is None
+        assert coordinator._ble_resume_handle is None
+        assert coordinator._ble is not None and coordinator._ble.started
+    finally:
+        loop.close()
