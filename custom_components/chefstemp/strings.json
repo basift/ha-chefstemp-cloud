@@ -55,7 +55,8 @@
       "fan": { "name": "Fan" }
     },
     "switch": {
-      "temperature_celsius": { "name": "Show temperature in °C" }
+      "temperature_celsius": { "name": "Show temperature in °C" },
+      "bluetooth": { "name": "Bluetooth" }
     },
     "number": {
       "fan_target": { "name": "Fan target" },

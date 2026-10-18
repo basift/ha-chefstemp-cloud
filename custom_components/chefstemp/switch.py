@@ -19,8 +19,55 @@ async def async_setup_entry(
     entry: ChefsTempConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up the temperature-unit switch."""
-    async_add_entities([ChefsTempTemperatureUnitSwitch(entry.runtime_data, entry)])
+    """Set up the temperature-unit switch, and the Bluetooth switch when supported."""
+    coordinator = entry.runtime_data
+    entities: list = [ChefsTempTemperatureUnitSwitch(coordinator, entry)]
+    if coordinator.ble_mac:
+        entities.append(ChefsTempBluetoothSwitch(coordinator))
+    async_add_entities(entities)
+
+
+class ChefsTempBluetoothSwitch(ChefsTempEntity, SwitchEntity):
+    """Let HA hold the stand's local BLE link (on), or release it for the phone app.
+
+    On (the default) means HA keeps its local Bluetooth link and reconnects on its
+    own. Turning it off powers HA's BLE down for a few minutes so the phone app can
+    claim the stand's single BLE slot; HA then re-enables itself automatically and
+    reclaims the link once the slot is free again.
+    """
+
+    _attr_translation_key = "bluetooth"
+    _attr_icon = "mdi:bluetooth"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator) -> None:
+        """Initialise the Bluetooth hold/release switch for this stand."""
+        super().__init__(coordinator, "bluetooth")
+
+    @property
+    def is_on(self) -> bool:
+        """Whether HA is allowed to hold the stand's local BLE link."""
+        return bool(self.coordinator.ble_enabled)
+
+    @property
+    def available(self) -> bool:
+        """Keep the control usable even while the stand is offline."""
+        return True
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Expose when HA will re-enable BLE after a release, if a release is active."""
+        return {"resumes_at": self.coordinator.ble_resume_at}
+
+    async def async_turn_on(self, **kwargs) -> None:
+        """Re-enable HA's local Bluetooth link immediately."""
+        await self.coordinator.async_enable_ble()
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs) -> None:
+        """Release the stand's BLE slot for the phone app; HA returns on its own."""
+        await self.coordinator.async_release_ble()
+        self.async_write_ha_state()
 
 
 class ChefsTempTemperatureUnitSwitch(ChefsTempEntity, SwitchEntity, RestoreEntity):

@@ -31,11 +31,14 @@ from .const import BLE_NOTIFY_UUID, BLE_WRITE_UUID
 
 _LOGGER = logging.getLogger(__name__)
 
-# Backoff between reconnection attempts, capped. The stand is only intermittently
-# connectable (slot contention, proxy coexistence), so retries must be patient
-# but not hammer the adapter.
-_RETRY_MIN = 8.0
-_RETRY_MAX = 60.0
+# Delay between reconnection attempts. The stand only advertises (and so is only
+# connectable) while its single external BLE slot is free — e.g. once the phone
+# app lets go of it. So the loop polls at a short, steady cadence to grab the
+# link within seconds of it becoming available, rather than backing off for a
+# minute. A missed advert makes async_ble_device_from_address return at once, so
+# this poll is cheap and does not hammer the adapter.
+_RETRY_MIN = 5.0
+_RETRY_MAX = 15.0
 
 
 class BleManager:

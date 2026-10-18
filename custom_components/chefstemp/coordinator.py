@@ -40,6 +40,11 @@ DEFAULT_FAN_TARGET = 110
 FAN_ECHO_TIMEOUT = 4.0
 FAN_MAX_RETRIES = 2
 PROBE_DIAGNOSTICS_SECONDS = 60
+# How long the "Bluetooth" switch releases HA's local BLE link for when turned
+# off. The stand has a single external BLE slot; releasing it for a few minutes
+# gives the phone app time to open and claim the slot. HA re-enables BLE on its
+# own afterwards and reconnects as soon as the slot is free again.
+BLE_RELEASE_SECONDS = 300
 
 
 def _empty_state() -> dict[str, Any]:
@@ -96,6 +101,12 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.push_connected = False
         self.ble_connected = False
         self.ble_mac: str | None = entry.data.get(CONF_BLE_MAC)
+        # Whether HA is allowed to hold the stand's local BLE link. The "Bluetooth"
+        # switch flips this off to hand the single BLE slot to the phone app, and
+        # a timer flips it back on (see async_release_ble / async_enable_ble).
+        self.ble_enabled = True
+        self._ble_resume_handle: asyncio.TimerHandle | None = None
+        self._ble_resume_at: datetime | None = None
         self.temperature_unit_override: str | None = None
 
         # Fan setpoint state HA owns and rebuilds full op20 frames from.
@@ -203,7 +214,7 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         of a Home Assistant Bluetooth adapter or proxy; it runs alongside the
         cloud channel, which stays connected as a fallback.
         """
-        if self._ble is not None or not self.ble_mac:
+        if self._ble is not None or not self.ble_mac or not self.ble_enabled:
             return
         self._ble = BleManager(
             self.hass,
@@ -217,10 +228,56 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @callback
     def _handle_ble_connect_change(self, connected: bool) -> None:
         self.ble_connected = connected
-        # Surface the source change immediately on the existing state.
+        self._push_source()
+
+    @callback
+    def _push_source(self) -> None:
+        """Surface the current connection source immediately on the existing state."""
         data = dict(self.data)
         data["connection_source"] = self.connection_source
         self.async_set_updated_data(data)
+
+    @property
+    def ble_resume_at(self) -> str | None:
+        """ISO time HA will re-enable BLE after a release, or None when enabled."""
+        return self._ble_resume_at.isoformat() if self._ble_resume_at else None
+
+    async def async_release_ble(self, seconds: int = BLE_RELEASE_SECONDS) -> None:
+        """Power off HA's local BLE for a while so the phone app can take the slot.
+
+        The stand exposes a single external BLE slot, so HA cannot hold it while
+        the phone app needs it. Releasing drops HA's link and suspends reconnects
+        for ``seconds``; a timer then re-enables BLE, which reclaims the link once
+        the slot is free again (whoever asks first while it is free wins it).
+        """
+        self.ble_enabled = False
+        if self._ble_resume_handle is not None:
+            self._ble_resume_handle.cancel()
+        self._ble_resume_at = datetime.now(UTC) + timedelta(seconds=seconds)
+        self._ble_resume_handle = self.hass.loop.call_later(seconds, self._resume_ble_cb)
+        if self._ble is not None:
+            await self._ble.async_stop()
+            self._ble = None
+        self.ble_connected = False
+        self._push_source()
+
+    async def async_enable_ble(self) -> None:
+        """Re-enable HA's local BLE and reconnect as soon as the slot is free."""
+        if self._ble_resume_handle is not None:
+            self._ble_resume_handle.cancel()
+            self._ble_resume_handle = None
+        self._ble_resume_at = None
+        self.ble_enabled = True
+        self._maybe_start_ble()
+        self._push_source()
+
+    @callback
+    def _resume_ble_cb(self) -> None:
+        """Timer callback: re-enable BLE after the release window elapses."""
+        self._ble_resume_handle = None
+        self.config_entry.async_create_background_task(
+            self.hass, self.async_enable_ble(), name=f"{DOMAIN}-ble-resume"
+        )
 
     def _threadsafe(self, func):
         """Wrap a callback so paho's thread can invoke it on the event loop."""
@@ -235,9 +292,7 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.push_connected = connected
         # A pending fan command is resolved by the echo-timeout/retry logic, which
         # fails it if neither channel is up — no special handling needed here.
-        data = dict(self.data)
-        data["connection_source"] = self.connection_source
-        self.async_set_updated_data(data)
+        self._push_source()
 
     @callback
     def _handle_frame(self, payload: bytes) -> None:
@@ -487,6 +542,9 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._probe_diagnostics_timer is not None:
             self._probe_diagnostics_timer.cancel()
             self._probe_diagnostics_timer = None
+        if self._ble_resume_handle is not None:
+            self._ble_resume_handle.cancel()
+            self._ble_resume_handle = None
         if self._ble is not None:
             await self._ble.async_stop()
             self._ble = None
