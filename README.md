@@ -8,12 +8,29 @@ Control and monitor a **ChefsTemp** BBQ system — the S1 "Stand" WiFi hub, its
 temperature probes and the Breezo fan — from Home Assistant. This is an
 independent, unofficial integration; it is not affiliated with ChefsTemp/Emax.
 
-The design goal is to put the **control logic in Home Assistant**, not the
-appliance. The stand's built-in fan behaviour is a blunt thermostat (it keeps
-running the fan for minutes after you open the lid, burning charcoal for nothing).
-This integration exposes each control separately so your own automations can be
-smart about it — for example, hold the fan off for a few minutes after a lid-open
-instead of chasing the temperature back up.
+## Why this exists
+
+We built this for **two** reasons:
+
+1. **To monitor and control the grill from Home Assistant, conveniently.** One
+   place for grill ambient, probe temperature and battery, stand battery, the fan,
+   its target setpoint and the high/low alarms — watch it and drive it without
+   reaching for the phone app, and wire it into your own automations, dashboards
+   and notifications. It talks to the stand over **local Bluetooth when reachable
+   and falls back to the vendor cloud**, so monitoring and control keep working.
+   The dashboard we actually use is in [`examples/dashboard.yaml`](examples/dashboard.yaml).
+
+2. **To fix the fan behaviour that bugged us.** The Breezo fan is a blunt on/off
+   thermostat with no idea the lid is open: open it to load food and the ambient
+   drops below target, so the fan immediately **blasts at full tilt** — oversmoking
+   the food and burning through charcoal for nothing. Putting the control logic in
+   Home Assistant lets an automation hold the fan off through a lid-open dip and
+   resume only once the grill has genuinely stalled — see the
+   [lid-open recovery automation](examples/automation-lid-open-recovery.yaml).
+
+To make the second goal possible, the integration deliberately exposes each
+control (fan on/off, fan target, alarms) as its own entity, so **your** automations
+decide the policy, not the appliance.
 
 ## Entities
 
@@ -30,6 +47,8 @@ Per stand (one Home Assistant device):
 | Probe N battery | sensor | % (diagnostic) |
 | Probe N signal | sensor | dBm (diagnostic, disabled by default) |
 | Show temperature in °C | switch | on forces °C for this stand's temperature sensors and controls; off follows HA's unit system |
+| Connection source | sensor | which channel is live now — Bluetooth / Cloud / Disconnected (diagnostic) |
+| Bluetooth | switch | on = Home Assistant holds the stand's local BLE link; off releases it for ~5 minutes so the phone app can take the stand's single BLE slot, then re-enables itself |
 | Fan | fan | on/off — see below |
 | Fan target | number | the fan's setpoint (°C) |
 | Grill high alarm | number | ambient high-alarm setpoint (°C) |
@@ -95,6 +114,16 @@ An already-off fan is never automatically enabled by this blueprint. Following
 an interrupted run/restart, inspect its notification and fan manually; no
 automatic restart/recovery latch is installed.
 
+A ready-to-paste instance of the recovery automation, wired to example entity
+IDs, is in [`examples/automation-lid-open-recovery.yaml`](examples/automation-lid-open-recovery.yaml).
+
+### Example dashboard
+
+The [`examples/`](examples/) folder also contains the Lovelace view we use to
+monitor and drive the grill — [`examples/dashboard.yaml`](examples/dashboard.yaml).
+It needs the HACS **frontend** cards `button-card` and `card-mod`; edit the entity
+IDs to match your stand.
+
 ## Installation
 
 Use the **Open in HACS** button above, or add the repository manually:
@@ -108,10 +137,20 @@ Use the **Open in HACS** button above, or add the repository manually:
 ## Transports: local BLE first, cloud fallback
 
 The stand speaks the **same wire protocol** over local Bluetooth and over the
-vendor cloud, so the integration is written to be transport-agnostic. Today only
-the **cloud (MQTT)** transport is implemented and enabled — it is reliable and
-needs no extra hardware. A local BLE transport can be added behind the same seam
-later; it needs a Bluetooth adapter Home Assistant can reach near the grill.
+vendor cloud, so the integration runs both and prefers whichever is better. When
+the stand is reachable over **BLE** (a Bluetooth adapter or an ESPHome proxy near
+the grill), the integration holds that link and uses it for telemetry and commands
+— fast and independent of WiFi/internet — and falls back to the **cloud (MQTT)**
+automatically when BLE is unavailable. The live channel is shown by the
+**Connection source** sensor.
+
+The stand exposes a **single external BLE slot**: whoever connects first owns it,
+so Home Assistant and the phone app cannot both hold it at once. The **Bluetooth**
+switch (on by default) releases Home Assistant's link for ~5 minutes — long enough
+to open the phone app and let it claim the slot — then re-enables itself, and Home
+Assistant reclaims BLE within seconds once the slot is free again. The probe stays
+connected to the stand throughout; it is the stand's own internal link, unaffected
+by which central holds the external slot.
 
 ## Security note
 
