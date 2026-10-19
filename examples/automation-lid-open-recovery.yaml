@@ -1,6 +1,6 @@
 # ChefsTemp — example automation: lid-open fan recovery (the "fan fix").
 #
-# This is the automation that fixes the thing that bugged us most about the stock
+# This is the automation that fixes the thing that bugged me most about the stock
 # behaviour: the Breezo fan is a dumb on/off thermostat, so the moment you open
 # the lid to load food (or spritz, flip, etc.) the grill ambient drops below the
 # fan target and the fan BLASTS at full tilt — oversmoking the food and burning

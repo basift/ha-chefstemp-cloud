@@ -1,6 +1,6 @@
 # ChefsTemp — example Lovelace dashboard (the "Backyard ChefsTemp" view).
 #
-# This is the dashboard we actually use to monitor and drive the grill from Home
+# This is the dashboard I actually use to monitor and drive the grill from Home
 # Assistant: grill ambient, probe temperature/battery, stand battery, the fan
 # thermostat enable, the fan target setpoint, the grill high/low alarms, the
 # Bluetooth release switch, and the temperature-unit toggle.
