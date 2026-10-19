@@ -10,7 +10,7 @@ independent, unofficial integration; it is not affiliated with ChefsTemp/Emax.
 
 ## Why this exists
 
-We built this for **two** reasons:
+I built this for **two** reasons:
 
 1. **To monitor and control the grill from Home Assistant, conveniently.** One
    place for grill ambient, probe temperature and battery, stand battery, the fan,
@@ -18,9 +18,9 @@ We built this for **two** reasons:
    reaching for the phone app, and wire it into your own automations, dashboards
    and notifications. It talks to the stand over **local Bluetooth when reachable
    and falls back to the vendor cloud**, so monitoring and control keep working.
-   The dashboard we actually use is in [`examples/dashboard.yaml`](examples/dashboard.yaml).
+   The dashboard I actually use is in [`examples/dashboard.yaml`](examples/dashboard.yaml).
 
-2. **To fix the fan behaviour that bugged us.** The Breezo fan is a blunt on/off
+2. **To fix the fan behaviour that bugged me.** The Breezo fan is a blunt on/off
    thermostat with no idea the lid is open: open it to load food and the ambient
    drops below target, so the fan immediately **blasts at full tilt** — oversmoking
    the food and burning through charcoal for nothing. Putting the control logic in
@@ -119,7 +119,7 @@ IDs, is in [`examples/automation-lid-open-recovery.yaml`](examples/automation-li
 
 ### Example dashboard
 
-The [`examples/`](examples/) folder also contains the Lovelace view we use to
+The [`examples/`](examples/) folder also contains the Lovelace view I use to
 monitor and drive the grill — [`examples/dashboard.yaml`](examples/dashboard.yaml).
 It needs the HACS **frontend** cards `button-card` and `card-mod`; edit the entity
 IDs to match your stand.
