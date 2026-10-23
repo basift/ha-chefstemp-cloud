@@ -1,0 +1,167 @@
+blueprint:
+  name: ChefsTemp - Grill setpoint controller
+  description: >-
+    One continuous fan controller around the Fan target, replacing the device's
+    blunt thermostat. On every fresh ambient sample it computes a rate and picks
+    a fan action:
+      - LID-OPEN GUARD: a fast drop (<= -lid_drop_rate C/min) forces the fan OFF,
+        so opening the lid (load/baste/check/remove) never blasts smoke onto the
+        food. Works from any prior fan state.
+      - ANTI-OVERSHOOT: while climbing fast under the fan, cut at (target - lead)
+        so inertia coasts onto the target instead of overshooting.
+      - HYSTERESIS HOLD: fan OFF at (target + hold_high), ON at (target - hold_low).
+      - STALL ESCAPE: when settled flat/declining below target (and the drop has
+        slowed, so smoke has cleared), turn the fan ON to reheat. A natural rise
+        is left alone.
+    Commands are issued to the ChefsTemp fan, which echo-confirms and retries them
+    itself. Thresholds are inputs (defaults calibrated on a 2026-10-22 charcoal
+    cook, 200 C); they are meant to be tuned over a few cooks. Temperature
+    differences are in C and auto-scaled for F entities.
+    Run ONLY this automation on the fan; disable the lid-open recovery/cooldown
+    and band-hysteresis blueprints so they do not fight it.
+  domain: automation
+  input:
+    temperature_sensor:
+      name: ChefsTemp grill ambient sensor
+      selector:
+        entity:
+          filter:
+            domain: sensor
+            device_class: temperature
+    target_entity:
+      name: ChefsTemp Fan target
+      selector:
+        entity:
+          filter:
+            domain: number
+            device_class: temperature
+    fan_entity:
+      name: ChefsTemp fan
+      selector:
+        entity:
+          filter:
+            domain: fan
+    overshoot_lead:
+      name: Anti-overshoot lead (C below target to cut while climbing)
+      default: 5
+      selector:
+        number: { min: 0, max: 40, mode: box }
+    ramp_rate:
+      name: Climb rate that counts as a ramp (C/min)
+      default: 6
+      selector:
+        number: { min: 1, max: 60, mode: box }
+    hold_high:
+      name: Hold band upper (C above target to cut)
+      default: 2
+      selector:
+        number: { min: 0, max: 20, step: 0.5, mode: box }
+    hold_low:
+      name: Hold band lower (C below target to enable)
+      default: 3
+      selector:
+        number: { min: 0, max: 20, step: 0.5, mode: box }
+    lid_drop_rate:
+      name: Lid-open drop rate (C/min; fan forced off at/above this fall)
+      default: 30
+      selector:
+        number: { min: 10, max: 150, mode: box }
+    fast_drop_guard:
+      name: Do-not-enable-while-falling faster than (C/min)
+      default: 10
+      selector:
+        number: { min: 1, max: 100, mode: box }
+    rising_margin:
+      name: Rise rate still treated as self-recovering (C/min)
+      default: 1
+      selector:
+        number: { min: 0, max: 20, step: 0.5, mode: box }
+    freshness_seconds:
+      name: Maximum time without an ambient MQTT sample (seconds)
+      default: 90
+      selector:
+        number: { min: 10, max: 1800, mode: box }
+
+mode: single
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input temperature_sensor
+
+variables:
+  temperature_sensor: !input temperature_sensor
+  target_entity: !input target_entity
+  fan_entity: !input fan_entity
+  overshoot_lead: !input overshoot_lead
+  ramp_rate: !input ramp_rate
+  hold_high: !input hold_high
+  hold_low: !input hold_low
+  lid_drop_rate: !input lid_drop_rate
+  fast_drop_guard: !input fast_drop_guard
+  rising_margin: !input rising_margin
+  freshness_seconds: !input freshness_seconds
+  unit: "{{ state_attr(temperature_sensor, 'unit_of_measurement') }}"
+  factor: "{{ 1.8 if unit == '°F' else 1 }}"
+  old_ts: >-
+    {{ as_timestamp(trigger.from_state.attributes.get('ambient_sample_at'), 0)
+       if trigger.from_state is not none else 0 }}
+  new_ts: >-
+    {{ as_timestamp(trigger.to_state.attributes.get('ambient_sample_at'), 0)
+       if trigger.to_state is not none else 0 }}
+  dt: "{{ new_ts | float - old_ts | float }}"
+  T: >-
+    {{ trigger.to_state.state | float(0) }}
+  Tprev: >-
+    {{ trigger.from_state.state | float(0) if trigger.from_state is not none else 0 }}
+  target_d: "{{ states(target_entity) | float(0) }}"
+  R: "{{ ((T - Tprev) / dt * 60) if dt | float > 0 else 0 }}"
+
+conditions:
+  - condition: template
+    value_template: >-
+      {% set before = trigger.from_state %}
+      {% set after = trigger.to_state %}
+      {{ before is not none and after is not none
+         and unit in ['°C', '°F']
+         and before.attributes.get('unit_of_measurement') == unit
+         and state_attr(target_entity, 'unit_of_measurement') == unit
+         and is_number(before.state) and is_number(after.state)
+         and is_number(states(target_entity))
+         and old_ts | float > 0 and new_ts | float > old_ts | float
+         and dt | float > 0
+         and as_timestamp(now()) - new_ts | float <= freshness_seconds | float
+         and 0 <= (T - (32 if unit == '°F' else 0)) / factor <= 500
+         and state_attr(fan_entity, 'command_status') not in ['pending', 'retrying'] }}
+
+actions:
+  - variables:
+      desired: >-
+        {% set lead = overshoot_lead | float * factor %}
+        {% set ramp = ramp_rate | float * factor %}
+        {% set hi = hold_high | float * factor %}
+        {% set lo = hold_low | float * factor %}
+        {% set lidrate = lid_drop_rate | float * factor %}
+        {% set fastguard = fast_drop_guard | float * factor %}
+        {% set rise = rising_margin | float * factor %}
+        {% if R | float <= -lidrate %}off
+        {% elif is_state(fan_entity, 'on') and (T >= target_d + hi or (T >= target_d - lead and R | float > ramp)) %}off
+        {% elif is_state(fan_entity, 'off') and T <= target_d - lo and R | float <= rise and R | float > -fastguard %}on
+        {% else %}none{% endif %}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ desired == 'on' and not is_state(fan_entity, 'on') }}"
+        sequence:
+          - action: fan.turn_on
+            target:
+              entity_id: !input fan_entity
+            continue_on_error: true
+      - conditions:
+          - condition: template
+            value_template: "{{ desired == 'off' and not is_state(fan_entity, 'off') }}"
+        sequence:
+          - action: fan.turn_off
+            target:
+              entity_id: !input fan_entity
+            continue_on_error: true
