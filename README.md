@@ -86,8 +86,9 @@ Assistant automation.
 
 ### Example automations
 
-The repository includes three optional [Home Assistant automation blueprints](blueprints/automation/chefstemp/):
+The repository includes several optional [Home Assistant automation blueprints](blueprints/automation/chefstemp/). The newest one is a full controller; the others are narrower, single-behaviour recipes. Run **only one** automation on the fan at a time.
 
+- [Grill setpoint controller](blueprints/automation/chefstemp/grill_setpoint_controller.yaml) — the recommended all-in-one. On every fresh ambient sample it computes a rate and manages the fan around Fan target: a lid-open guard (any fast drop forces the fan off, so opening the lid never blasts smoke onto the food), anti-overshoot (cuts early while climbing so inertia coasts onto target), a hysteresis hold, and a stall escape (re-enables once the grill settles below target, a natural rise is left alone). Thresholds are inputs with defaults calibrated on a real cook; tune them over a few cooks. Disable the three recipes below when you use this.
 - [Lid-open fan cooldown](blueprints/automation/chefstemp/lid_open_fan_cooldown.yaml) turns the thermostat off after a rapid ambient-temperature drop and restores it after a cooldown only if it was enabled beforehand and no one has turned it back on.
 - [Temperature-band hysteresis](blueprints/automation/chefstemp/temperature_band_hysteresis.yaml) enables the thermostat below a lower probe-temperature threshold and disables it above an upper threshold.
 - [Lid-open recovery then stall](blueprints/automation/chefstemp/lid_open_recovery_stall.yaml) disables an already-on thermostat after a fresh near-target ambient drop, waits for a confirmed natural rise, and re-enables only after the rise slows/plateaus or reverses over a full window while meaningfully below Fan target. On uncertainty, timeout or interruption/restart, it leaves the fan off with a persistent notification for manual review. Fan-off must be confirmed by device telemetry before observation begins.
