@@ -1,0 +1,298 @@
+"""Tests for the ChefsTemp frame codec.
+
+The bytes below are the real shapes seen on the wire (see docs/PROTOCOL.md §4b):
+command frames the device accepted, and uplink telemetry it produced. ``frames``
+is dependency-free, so it is loaded directly from its file to keep this suite
+runnable without Home Assistant installed.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+_FRAMES_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "custom_components"
+    / "chefstemp"
+    / "frames.py"
+)
+_spec = importlib.util.spec_from_file_location("chefstemp_frames", _FRAMES_PATH)
+frames = importlib.util.module_from_spec(_spec)
+assert _spec and _spec.loader
+_spec.loader.exec_module(frames)
+
+
+# --- encoding: byte-for-byte matches frames the device accepted ---------------
+
+
+def test_fan_on_matches_captured_frame() -> None:
+    """fan_on(230) reproduces the exact frame the device applied."""
+    assert frames.fan_on(230).hex() == "aa55538107200709020dbd00e602be"
+
+
+def test_high_alarm_encoding_and_checksum() -> None:
+    assert frames.high_alarm(130).hex() == "aa5553810776020082d4"
+    assert frames.verify(frames.high_alarm(130))
+
+
+def test_every_builder_has_a_valid_checksum() -> None:
+    for frame in (
+        frames.fan_on(110),
+        frames.fan_off(110),
+        frames.high_alarm(200),
+        frames.low_alarm(90),
+        frames.ping(),
+    ):
+        assert frames.verify(frame)
+
+
+def test_downlink_header_third_byte_is_07() -> None:
+    """The device silently ignores frames whose third header byte is not 0x07."""
+    assert frames.fan_on(110)[2:5] == bytes((0x53, 0x81, 0x07))
+
+
+# --- decoding: real uplink captures ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("hex_frame", "expected"),
+    [
+        ("aa5557a2067102002293", {"type": "ambient", "celsius": 34}),
+        (
+            "aa5557a2062006003200f028af1d",
+            {"type": "probe", "idx": 0, "celsius": 24.0, "battery": 40, "rssi": -81},
+        ),
+        ("aa5558a20610016474", {"type": "stand_battery", "percent": 100}),
+    ],
+)
+def test_decode_real_frames(hex_frame: str, expected: dict) -> None:
+    assert frames.parse(bytes.fromhex(hex_frame)) == [expected]
+
+
+def test_ambient_disconnect_code() -> None:
+    """Error codes 0xFEFE/0xFF02 in ambient mean the grill probe is disconnected."""
+    for payload in (b"\xfe\xfe", b"\xff\x02"):
+        frame = frames.build(op=0x71, payload=payload, header=b"\x57\xa2\x06")
+        assert frames.parse(frame) == [{"type": "ambient_disconnect"}]
+
+
+def test_valid_ambient_not_affected_by_disconnect_code() -> None:
+    """Ordinary ambient temperatures still decode as temperatures."""
+    for payload, expected in ((b"\x00\x22", 34), (b"\x00\x10", 16)):
+        frame = frames.build(op=0x71, payload=payload, header=b"\x57\xa2\x06")
+        assert frames.parse(frame) == [{"type": "ambient", "celsius": expected}]
+
+
+@pytest.mark.parametrize("length", range(14))
+def test_parse_rejects_truncated_probe_frame(length: int) -> None:
+    frame = frames.build(0x20, b"\x00\x32\x02\x58\x3c\xaf", header=b"\x57\xa2\x06")
+    assert len(frame) == 14
+    assert not frames.verify(frame[:length])
+    assert frames.parse(frame[:length]) == []
+
+
+@pytest.mark.parametrize("offset", range(14))
+def test_parse_rejects_each_single_byte_probe_mutation(offset: int) -> None:
+    frame = frames.build(0x20, b"\x00\x32\x00\xc8\x3c\xaf", header=b"\x57\xa2\x06")
+    corrupt = frame[:offset] + bytes((frame[offset] ^ 1,)) + frame[offset + 1:]
+    assert frames.parse(frame) == [
+        {"type": "probe", "idx": 0, "celsius": 20.0, "battery": 60, "rssi": -81}
+    ]
+    assert not frames.verify(corrupt)
+    assert frames.parse(corrupt) == []
+
+
+def test_parse_rejects_bad_checksum_without_losing_next_frame() -> None:
+    first = frames.build(0x20, b"\x00\x32\x00\x78\x3c\xaf", header=b"\x57\xa2\x06")
+    valid = frames.build(0x20, b"\x01\x32\x02\x58\x50\xb0", header=b"\x57\xa2\x06")
+    corrupt = first[:-1] + bytes((first[-1] ^ 1,))
+    assert not frames.verify(corrupt)
+    assert frames.parse(corrupt + valid) == [
+        {"type": "probe", "idx": 1, "celsius": 60.0, "battery": 80, "rssi": -80}
+    ]
+
+
+def test_corrupt_probe_temperature_cannot_replace_60_with_12() -> None:
+    valid = frames.build(0x20, b"\x00\x32\x02\x58\x3c\xaf", header=b"\x57\xa2\x06")
+    corrupt = valid[:9] + b"\x00\x78" + valid[11:]
+    assert frames.parse(valid) == [
+        {"type": "probe", "idx": 0, "celsius": 60.0, "battery": 60, "rssi": -81}
+    ]
+    assert not frames.verify(corrupt)
+    assert frames.parse(corrupt) == []
+
+
+def test_corrupt_probe_temperature_cannot_replace_20_with_28() -> None:
+    valid = frames.build(0x20, b"\x00\x32\x00\xc8\x3c\xaf", header=b"\x57\xa2\x06")
+    corrupt = valid[:9] + b"\x01\x18" + valid[11:]
+    assert frames.parse(valid) == [
+        {"type": "probe", "idx": 0, "celsius": 20.0, "battery": 60, "rssi": -81}
+    ]
+    assert not frames.verify(corrupt)
+    assert frames.parse(corrupt) == []
+
+
+@pytest.mark.parametrize(
+    ("opcode", "payload"),
+    [
+        (0x71, b"\x00\x21"),
+        (0x73, b"\x04\x01\x09\x00\x00"),
+        (0x10, b"\x3c"),
+    ],
+)
+def test_parse_rejects_corrupt_ambient_fan_and_stand_frames(opcode: int, payload: bytes) -> None:
+    valid = frames.build(opcode, payload, header=b"\x57\xa2\x06")
+    assert frames.parse(valid)
+    corrupt = valid[:-1] + bytes((valid[-1] ^ 1,))
+    assert frames.parse(corrupt) == []
+
+
+def test_decode_fan_state_on_and_off() -> None:
+    up = bytes((0x57, 0xA2, 0x06))
+    on = frames.build(0x73, bytes(6) + bytes((0x04, 0x01, 0x09, 0x02, 0x02)), header=up)
+    off = frames.build(0x73, bytes(6) + bytes((0x04, 0x01, 0x09, 0x00, 0x00)), header=up)
+    assert frames.parse(on) == [{"type": "fan", "mode": 2, "strength": 2, "on": True}]
+    assert frames.parse(off) == [{"type": "fan", "mode": 0, "strength": 0, "on": False}]
+
+
+def test_concatenated_frames_and_trailing_ascii() -> None:
+    """One payload may hold several frames plus keepalive text."""
+    blob = (
+        bytes.fromhex("aa5557a2062006003200f028af1d")
+        + bytes.fromhex("aa5557a2065002000050")  # op50, ignored
+        + b"ble_work\r\n"
+    )
+    assert frames.parse(blob) == [
+        {"type": "probe", "idx": 0, "celsius": 24.0, "battery": 40, "rssi": -81}
+    ]
+
+
+@pytest.mark.parametrize("junk", ["", "aa55", "aa5500", "1234567890", "aa5557a206"])
+def test_parse_ignores_junk(junk: str) -> None:
+    assert frames.parse(bytes.fromhex(junk)) == []
+
+
+def test_roundtrip_fan_command_target_survives() -> None:
+    """A fan command re-decoded via the echo header carries its target back."""
+    frame = frames.fan_on(175)
+    # Rewrite the downlink header to the echo header the device sends back.
+    echo = bytes((0xAA, 0x55, 0x57, 0xA2, 0x07)) + frame[5:]
+    # It is a fan (op20) echo; the target field is bytes 11-12 of the payload.
+    payload = echo[7:7 + echo[6]]
+    assert int.from_bytes(payload[4:6], "big") == 175
+
+
+def test_fan_echo_decodes_as_fan_echo_not_probe() -> None:
+    """The op20 echo is a command confirmation (fan_echo), never a probe reading."""
+    echo = frames.build(0x20, frames.fan_on(175)[7:-1], header=bytes((0x57, 0xA2, 0x07)))
+    probe = bytes.fromhex("aa5557a2062006003200f028af1d")
+    assert frames.parse(echo + probe) == [
+        {"type": "fan_echo", "mode": 2, "on": True, "target": 175, "strength": 2},
+        {"type": "probe", "idx": 0, "celsius": 24.0, "battery": 40, "rssi": -81},
+    ]
+
+
+def test_decodes_live_fan_echo_off_and_on() -> None:
+    """Real captured fan echoes (h1=0xA4) confirm the applied mode and target."""
+    # OFF echo captured 2026-10-18: op20 h2=07, payload 09 00 0dbd 00c8 02.
+    assert frames.parse(bytes.fromhex("aa5557a407200709000dbd00c802c5")) == [
+        {"type": "fan_echo", "mode": 0, "on": False, "target": 200, "strength": 2}
+    ]
+    on_echo = frames.build(0x20, bytes.fromhex("09020dbd00e602"), header=b"\x57\xa4\x07")
+    assert frames.parse(on_echo) == [
+        {"type": "fan_echo", "mode": 2, "on": True, "target": 230, "strength": 2}
+    ]
+
+
+@pytest.mark.parametrize("header", [b"\x57\xa2\x07", b"\x58\xa2\x07"])
+def test_ping_echo_cannot_create_stand_battery(header: bytes) -> None:
+    echo = frames.build(0x10, b"\x00", header=header)
+    battery = bytes.fromhex("aa5558a20610016474")
+    assert frames.parse(echo + battery) == [{"type": "stand_battery", "percent": 100}]
+
+
+def test_probe_candidate_classification_and_index_boundaries() -> None:
+    up = b"\x57\xa2\x06"
+    good = frames.build(0x20, b"\x00\x32\x00\xc8\x3c\xaf", header=up)
+    second = frames.build(0x20, b"\x01\x32\x01\x18\x50\xb0", header=up)
+    bad_checksum = good[:-1] + bytes((good[-1] ^ 1,))
+    bad_marker = frames.build(0x20, b"\x00\x31\x00\xc8\x3c\xaf", header=up)
+    short = b"\xaa\x55" + up + b"\x20\x06"
+    missing_checksum = good[:-1]
+    echo = frames.build(0x20, b"\x00\x32\x00\xc8\x3c\xaf", header=b"\x57\xa2\x07")
+    observed: list[tuple[int | None, bool, str]] = []
+
+    events = frames.parse(
+        good + bad_checksum + second + bad_marker + missing_checksum + short + echo,
+        lambda idx, accepted, reason: observed.append((idx, accepted, reason)),
+    )
+    assert [event["idx"] for event in events] == [0, 1]
+    assert observed == [
+        (0, True, "accepted"),
+        (0, False, "checksum"),
+        (1, True, "accepted"),
+        (0, False, "payload_marker"),
+        (0, False, "truncated"),
+        (None, False, "truncated"),
+    ]
+
+
+def test_non_probe_and_unrecognizable_segments_are_not_probe_candidates() -> None:
+    observed: list[tuple[int | None, bool]] = []
+    ambient = frames.build(0x71, b"\x00\x21", header=b"\x57\xa2\x06")
+    frames.parse(b"keepalive" + ambient + b"\xaa\x55\x57\xa2", lambda *args: observed.append(args))
+    assert observed == []
+
+
+# --- regression: the h1 header byte is not fixed (A2 vs A4) --------------------
+# Real capture 2026-10-18: the device sent telemetry with h1=0xA4. The old parser
+# pinned h1=0xA2 and rejected every frame, freezing all sensors. These are the
+# exact bytes seen on the wire.
+
+
+def test_decodes_live_a4_header_probe_frame() -> None:
+    """A probe frame with h1=0xA4 (not 0xA2) must decode, not be rejected."""
+    blob = bytes.fromhex("aa5557a4065002000052aa5557a4062006003200dc28d531")
+    assert frames.parse(blob) == [
+        {"type": "probe", "idx": 0, "celsius": 22.0, "battery": 40, "rssi": -43}
+    ]
+
+
+def test_decodes_live_a4_header_ambient_disconnect_and_stand_battery() -> None:
+    assert frames.parse(bytes.fromhex("aa5557a4067102ff0274")) == [
+        {"type": "ambient_disconnect"}
+    ]
+    assert frames.parse(bytes.fromhex("aa5558a40610013c4e")) == [
+        {"type": "stand_battery", "percent": 60}
+    ]
+
+
+@pytest.mark.parametrize("h1", [0xA2, 0xA4, 0xA6, 0x00, 0xFF])
+def test_probe_decodes_regardless_of_h1(h1: int) -> None:
+    """Only the checksum and op/h2 matter; any h1 value decodes the same."""
+    frame = frames.build(0x20, b"\x00\x32\x02\x58\x3c\xaf", header=bytes((0x57, h1, 0x06)))
+    assert frames.parse(frame) == [
+        {"type": "probe", "idx": 0, "celsius": 60.0, "battery": 60, "rssi": -81}
+    ]
+
+
+def test_a4_probe_counts_as_accepted_candidate() -> None:
+    """The diagnostic classifier must count an A4 probe as accepted, not rejected."""
+    observed: list[tuple[int | None, bool, str]] = []
+    frame = frames.build(0x20, b"\x00\x32\x00\xdc\x28\xd5", header=b"\x57\xa4\x06")
+    frames.parse(frame, lambda *args: observed.append(args))
+    assert observed == [(0, True, "accepted")]
+
+
+def test_aa55_inside_payload_is_not_split() -> None:
+    """A payload containing the bytes AA 55 must stay one frame (length-aware)."""
+    # temp low byte 0xAA, battery 0x55 -> the payload holds the sync bytes.
+    frame = frames.build(0x20, b"\x00\x32\x02\xaa\x55\xd5", header=b"\x57\xa4\x06")
+    assert b"\xaa\x55" in frame[7:-1]  # the sync bytes really are inside the payload
+    assert len(frames.split_frames(frame)) == 1
+    assert frames.parse(frame) == [
+        {"type": "probe", "idx": 0, "celsius": 68.2, "battery": 85, "rssi": -43}
+    ]

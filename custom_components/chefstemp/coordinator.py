@@ -1,0 +1,554 @@
+"""Keeps one stand's state in sync, over MQTT push with a REST safety net.
+
+Live values (grill temp, probe temp/battery/signal, fan running state, stand
+battery) arrive as pushed MQTT frames and are decoded by frames.py. The REST
+poll only refreshes metadata that telemetry never carries — whether the device
+is still on the account, and the fan target and alarm setpoints. Those
+setpoints are shared with the vendor app: it saves them to the cloud copy,
+while HA's own device commands never reach the cloud. So a cloud value is
+adopted only on first load or when it changed since the previous poll; an
+unchanged cloud copy never clobbers a value written from HA.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+
+from . import frames
+from .api import ChefsTempApi, ChefsTempAuthError, ChefsTempError
+from .ble import BleManager
+from .const import CONF_BLE_MAC, CONF_DEVICE_MAC, DEFAULT_SCAN_INTERVAL, DOMAIN
+from .mqtt import CloudMqttTransport
+
+_LOGGER = logging.getLogger(__name__)
+
+type ChefsTempConfigEntry = ConfigEntry["ChefsTempCoordinator"]
+
+DEFAULT_FAN_TARGET = 110
+# A fan command is confirmed by the device's own echo (op20, h2=07), which comes
+# back within ~1s. If no echo arrives in this window the command may have been
+# lost, so it is re-sent (idempotent) up to FAN_MAX_RETRIES times before being
+# marked unconfirmed — more reliable than waiting for the sparse op73 fan-state.
+FAN_ECHO_TIMEOUT = 4.0
+FAN_MAX_RETRIES = 2
+PROBE_DIAGNOSTICS_SECONDS = 60
+# How long the "Bluetooth" switch releases HA's local BLE link for when turned
+# off. The stand has a single external BLE slot; releasing it for a few minutes
+# gives the phone app time to open and claim the slot. HA re-enables BLE on its
+# own afterwards and reconnects as soon as the slot is free again.
+BLE_RELEASE_SECONDS = 300
+
+
+def _empty_state() -> dict[str, Any]:
+    return {
+        "available": False,
+        "connection_source": "disconnected",
+        "ambient": None,
+        "ambient_sample_at": None,
+        "fan_on": False,
+        "fan_enabled": None,
+        "fan_running": None,
+        "fan_command_status": None,
+        "fan_strength": 0,
+        "stand_battery": None,
+        "probes": {},
+        "probe_frame_counts": {"probe_1": {"received": 0, "accepted": 0, "rejected": 0}},
+        "probe_diagnostics": {
+            "received": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "reasons": {},
+            "by_probe": {"probe_1": {"received": 0, "accepted": 0, "rejected": 0, "reasons": {}}},
+            "last_rejection_reason": None,
+            "last_rejection_at": None,
+        },
+        "alarm_high": None,
+        "alarm_low": None,
+        "fan_target": None,
+    }
+
+
+class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+    """State, MQTT lifecycle and command dispatch for a single stand."""
+
+    config_entry: ChefsTempConfigEntry
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ChefsTempConfigEntry,
+        api: ChefsTempApi,
+    ) -> None:
+        """Initialise the coordinator for one stand."""
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=DOMAIN,
+            config_entry=entry,
+            update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
+        )
+        self.api = api
+        self.device_mac = entry.data[CONF_DEVICE_MAC]
+        self.device_name = entry.title
+        self.push_connected = False
+        self.ble_connected = False
+        self.ble_mac: str | None = entry.data.get(CONF_BLE_MAC)
+        # Whether HA is allowed to hold the stand's local BLE link. The "Bluetooth"
+        # switch flips this off to hand the single BLE slot to the phone app, and
+        # a timer flips it back on (see async_release_ble / async_enable_ble).
+        self.ble_enabled = True
+        self._ble_resume_handle: asyncio.TimerHandle | None = None
+        self._ble_resume_at: datetime | None = None
+        self.temperature_unit_override: str | None = None
+
+        # Fan setpoint state HA owns and rebuilds full op20 frames from.
+        self.fan_target = DEFAULT_FAN_TARGET
+        self.fan_strength = frames.FAN_STRENGTH
+        self.fan_seconds = frames.FAN_SECONDS
+        # Setpoints as last seen in the cloud copy, to detect official-app edits.
+        self._cloud_seen: dict[str, int] = {}
+        self._fan_lock = asyncio.Lock()
+        self._fan_pending: bool | None = None
+        self._fan_timer: asyncio.TimerHandle | None = None
+        self._fan_frame: bytes | None = None
+        self._fan_retries = 0
+        # Bounded by the one-byte probe index; None groups truncated candidates.
+        self._probe_frame_counts: dict[int | None, list[int]] = {0: [0, 0]}
+        self._probe_rejection_counts: dict[int | None, dict[str, int]] = {0: {}}
+        self._last_probe_rejection_reason: str | None = None
+        self._last_probe_rejection_at: str | None = None
+        self._probe_diagnostics_timer: asyncio.TimerHandle | None = None
+
+        self._transport: CloudMqttTransport | None = None
+        self._ble: BleManager | None = None
+        self.data = _empty_state()
+
+    @property
+    def connection_source(self) -> str:
+        """Which channel is currently carrying telemetry/commands."""
+        if self.ble_connected:
+            return "ble"
+        if self.push_connected:
+            return "cloud"
+        return "disconnected"
+
+    # ------------------------------------------------------------------
+    # Polling (metadata only)
+    # ------------------------------------------------------------------
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Refresh device presence and pick up setpoints edited in the vendor app."""
+        try:
+            devices = await self.api.async_get_devices()
+        except ChefsTempAuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except ChefsTempError as err:
+            raise UpdateFailed(str(err)) from err
+
+        device = next(
+            (d for d in devices if d["mac"] == self.device_mac), None
+        )
+        data = dict(self.data)
+        data["available"] = device is not None
+        if device is not None:
+            self._sync_from_cloud(device, data)
+            if not self.ble_mac and device.get("ble_mac"):
+                self.ble_mac = str(device["ble_mac"])
+            self._maybe_start_ble()
+        return data
+
+    def _sync_from_cloud(self, device: dict[str, Any], data: dict[str, Any]) -> None:
+        """Adopt the fan target and alarm setpoints when the cloud copy changes.
+
+        The vendor app saves its edits to the cloud; HA's writes go only to the
+        device and are never echoed back. A value is therefore taken on first load
+        and whenever it differs from the previous poll, and otherwise left alone.
+        The device already applied an official-app edit, so nothing is sent.
+        """
+        fan = device.get("fan")
+        cloud: dict[str, Any] = {
+            "fan_target": fan.get("temperature") if isinstance(fan, dict) else None,
+            "alarm_high": device.get("alarm_high"),
+            "alarm_low": device.get("alarm_low"),
+        }
+        for key, raw in cloud.items():
+            try:
+                value = round(float(raw))
+            except (TypeError, ValueError):
+                continue
+            if self._cloud_seen.get(key) != value:
+                data[key] = value
+                if key == "fan_target":
+                    self.fan_target = value
+            self._cloud_seen[key] = value
+        data["fan_target"] = self.fan_target
+
+    # ------------------------------------------------------------------
+    # Live updates (MQTT push)
+    # ------------------------------------------------------------------
+
+    async def async_start_push(self) -> None:
+        """Open the cloud channel, and the local BLE channel when reachable."""
+        self._transport = CloudMqttTransport(
+            email=self.api.email or "",
+            device_mac=self.device_mac,
+            on_frame=self._threadsafe(self._handle_frame),
+            on_connect_change=self._threadsafe(self._handle_connect_change),
+        )
+        await self.hass.async_add_executor_job(self._transport.connect)
+        self._maybe_start_ble()
+
+    @callback
+    def _maybe_start_ble(self) -> None:
+        """Start the local BLE manager once the stand's BLE address is known.
+
+        BLE is the preferred, cloud-independent path when the stand is in range
+        of a Home Assistant Bluetooth adapter or proxy; it runs alongside the
+        cloud channel, which stays connected as a fallback.
+        """
+        if self._ble is not None or not self.ble_mac or not self.ble_enabled:
+            return
+        self._ble = BleManager(
+            self.hass,
+            address=self.ble_mac,
+            name=self.device_name,
+            on_frame=self._handle_frame,  # bleak callbacks already run on the loop
+            on_connect_change=self._handle_ble_connect_change,
+        )
+        self._ble.async_start()
+
+    @callback
+    def _handle_ble_connect_change(self, connected: bool) -> None:
+        self.ble_connected = connected
+        self._push_source()
+
+    @callback
+    def _push_source(self) -> None:
+        """Surface the current connection source immediately on the existing state."""
+        data = dict(self.data)
+        data["connection_source"] = self.connection_source
+        self.async_set_updated_data(data)
+
+    @property
+    def ble_resume_at(self) -> str | None:
+        """ISO time HA will re-enable BLE after a release, or None when enabled."""
+        return self._ble_resume_at.isoformat() if self._ble_resume_at else None
+
+    async def async_release_ble(self, seconds: int = BLE_RELEASE_SECONDS) -> None:
+        """Power off HA's local BLE for a while so the phone app can take the slot.
+
+        The stand exposes a single external BLE slot, so HA cannot hold it while
+        the phone app needs it. Releasing drops HA's link and suspends reconnects
+        for ``seconds``; a timer then re-enables BLE, which reclaims the link once
+        the slot is free again (whoever asks first while it is free wins it).
+        """
+        self.ble_enabled = False
+        if self._ble_resume_handle is not None:
+            self._ble_resume_handle.cancel()
+        self._ble_resume_at = datetime.now(UTC) + timedelta(seconds=seconds)
+        self._ble_resume_handle = self.hass.loop.call_later(seconds, self._resume_ble_cb)
+        if self._ble is not None:
+            await self._ble.async_stop()
+            self._ble = None
+        self.ble_connected = False
+        self._push_source()
+
+    async def async_enable_ble(self) -> None:
+        """Re-enable HA's local BLE and reconnect as soon as the slot is free."""
+        if self._ble_resume_handle is not None:
+            self._ble_resume_handle.cancel()
+            self._ble_resume_handle = None
+        self._ble_resume_at = None
+        self.ble_enabled = True
+        self._maybe_start_ble()
+        self._push_source()
+
+    @callback
+    def _resume_ble_cb(self) -> None:
+        """Timer callback: re-enable BLE after the release window elapses."""
+        self._ble_resume_handle = None
+        self.config_entry.async_create_background_task(
+            self.hass, self.async_enable_ble(), name=f"{DOMAIN}-ble-resume"
+        )
+
+    def _threadsafe(self, func):
+        """Wrap a callback so paho's thread can invoke it on the event loop."""
+
+        def _wrapped(*args):
+            self.hass.loop.call_soon_threadsafe(func, *args)
+
+        return _wrapped
+
+    @callback
+    def _handle_connect_change(self, connected: bool) -> None:
+        self.push_connected = connected
+        # A pending fan command is resolved by the echo-timeout/retry logic, which
+        # fails it if neither channel is up — no special handling needed here.
+        self._push_source()
+
+    @callback
+    def _handle_frame(self, payload: bytes) -> None:
+        """Decode a pushed payload and apply every event it carries."""
+        events = frames.parse(payload, self._count_probe_candidate)
+        if not events:
+            return
+        data = dict(self.data)
+        data["probes"] = dict(data["probes"])
+        changed = False
+        for event in events:
+            changed |= self._apply_event(event, data)
+        if changed:
+            data["available"] = True
+            self.async_set_updated_data(data)
+
+    @callback
+    def _count_probe_candidate(self, idx: int | None, accepted: bool, reason: str) -> None:
+        """Accumulate bounded reason counts; never retain frame contents."""
+        counts = self._probe_frame_counts.setdefault(idx, [0, 0])
+        counts[0] += 1
+        counts[1] += int(accepted)
+        if not accepted:
+            reasons = self._probe_rejection_counts.setdefault(idx, {})
+            reasons[reason] = reasons.get(reason, 0) + 1
+            self._last_probe_rejection_reason = reason
+            self._last_probe_rejection_at = datetime.now(UTC).isoformat()
+        if self._probe_diagnostics_timer is None:
+            self._probe_diagnostics_timer = self.hass.loop.call_later(
+                PROBE_DIAGNOSTICS_SECONDS, self._publish_probe_counts
+            )
+
+    @callback
+    def _publish_probe_counts(self) -> None:
+        """Publish one aggregated snapshot at most once per interval."""
+        self._probe_diagnostics_timer = None
+        counts = {
+            "unindexed" if idx is None else f"probe_{idx + 1}": {
+                "received": values[0],
+                "accepted": values[1],
+                "rejected": values[0] - values[1],
+            }
+            for idx, values in self._probe_frame_counts.items()
+        }
+        by_probe: dict[str, dict[str, Any]] = {}
+        reason_totals: dict[str, int] = {}
+        for idx, values in self._probe_frame_counts.items():
+            name = "unindexed" if idx is None else f"probe_{idx + 1}"
+            reasons = dict(self._probe_rejection_counts.get(idx, {}))
+            by_probe[name] = {
+                "received": values[0],
+                "accepted": values[1],
+                "rejected": values[0] - values[1],
+                "reasons": reasons,
+            }
+            for reason, total in reasons.items():
+                reason_totals[reason] = reason_totals.get(reason, 0) + total
+        received = sum(item["received"] for item in by_probe.values())
+        accepted = sum(item["accepted"] for item in by_probe.values())
+        data = dict(self.data)
+        data["probe_frame_counts"] = counts
+        data["probe_diagnostics"] = {
+            "received": received,
+            "accepted": accepted,
+            "rejected": received - accepted,
+            "reasons": reason_totals,
+            "by_probe": by_probe,
+            "last_rejection_reason": self._last_probe_rejection_reason,
+            "last_rejection_at": self._last_probe_rejection_at,
+        }
+        self.async_set_updated_data(data)
+
+    def _apply_event(self, event: dict[str, Any], data: dict[str, Any]) -> bool:
+        """Merge one decoded event into the state; return whether it changed."""
+        kind = event["type"]
+        if kind == "ambient":
+            data["ambient"] = event["celsius"]
+            data["ambient_sample_at"] = datetime.now(UTC).isoformat()
+        elif kind == "ambient_disconnect":
+            data["ambient"] = None
+            data["ambient_sample_at"] = None
+        elif kind == "fan":
+            # op73 is the device's own view of the fan, but it proved unreliable
+            # for on/off (it reported the fan off while it was physically running),
+            # so it only feeds diagnostic attributes. The authoritative on/off
+            # state comes from the command echo (see "fan_echo"), which the device
+            # returns for every command it receives.
+            data["fan_enabled"] = event["on"]
+            data["fan_running"] = event["on"] and event["strength"] > 0
+            data["fan_strength"] = event["strength"]
+        elif kind == "fan_echo":
+            # The device confirmed a fan command it received. This is the prompt,
+            # authoritative signal of what it applied, so it sets the on/off state
+            # and resolves a pending command (confirming delivery).
+            data["fan_on"] = event["on"]
+            if self._fan_pending is not None and event["on"] == self._fan_pending:
+                self._confirm_fan_command(data)
+        elif kind == "stand_battery":
+            data["stand_battery"] = event["percent"]
+        elif kind == "probe":
+            data["probes"][event["idx"]] = {
+                "celsius": event["celsius"],
+                "battery": event["battery"],
+                "rssi": event["rssi"],
+            }
+        else:
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Commands
+    # ------------------------------------------------------------------
+
+    async def _async_send(self, frame: bytes) -> None:
+        """Send one command frame, preferring the local BLE link over the cloud."""
+        if self._ble is not None and self._ble.connected:
+            try:
+                await self._ble.async_send(frame)
+                return
+            except Exception as err:
+                _LOGGER.debug("ChefsTemp BLE send failed, using cloud: %s", err)
+        if self._transport is None:
+            raise UpdateFailed("No transport is connected")
+        await self.hass.async_add_executor_job(self._transport.send, frame)
+
+    async def async_set_fan(self, on: bool) -> None:
+        """Enable the fan thermostat, or force it off, confirmed by the device echo."""
+        async with self._fan_lock:
+            self._fan_frame = (
+                frames.fan_on(self.fan_target, self.fan_strength, self.fan_seconds)
+                if on
+                else frames.fan_off(self.fan_target, self.fan_strength, self.fan_seconds)
+            )
+            self._cancel_fan_timer()
+            self._fan_pending = on
+            self._fan_retries = 0
+            data = dict(self.data)
+            data["fan_on"] = on
+            data["fan_command_status"] = "pending"
+            self.async_set_updated_data(data)
+            try:
+                await self._async_send(self._fan_frame)
+            except BaseException:
+                self._fail_fan_command()
+                raise
+            self._arm_fan_timer()
+
+    def _cancel_fan_timer(self) -> None:
+        if self._fan_timer is not None:
+            self._fan_timer.cancel()
+            self._fan_timer = None
+
+    def _arm_fan_timer(self) -> None:
+        """Wait for the device's echo; retry on silence, then give up."""
+        self._cancel_fan_timer()
+        if self._fan_pending is None:
+            return
+        if not (self.push_connected or self.ble_connected):
+            # No channel to receive the echo on; the command may still have been
+            # sent, so mark it unconfirmed rather than failed.
+            self._fan_pending = None
+            data = dict(self.data)
+            data["fan_command_status"] = "unconfirmed"
+            self.async_set_updated_data(data)
+            return
+        self._fan_timer = self.hass.loop.call_later(
+            FAN_ECHO_TIMEOUT, self._on_fan_echo_timeout
+        )
+
+    @callback
+    def _confirm_fan_command(self, data: dict[str, Any]) -> None:
+        """A matching echo arrived: the command was delivered and applied."""
+        self._cancel_fan_timer()
+        self._fan_pending = None
+        self._fan_retries = 0
+        data["fan_command_status"] = "confirmed"
+
+    @callback
+    def _on_fan_echo_timeout(self) -> None:
+        """No echo within the window: re-send, or give up after the retries."""
+        self._fan_timer = None
+        if self._fan_pending is None:
+            return
+        if self._fan_retries < FAN_MAX_RETRIES:
+            self._fan_retries += 1
+            data = dict(self.data)
+            data["fan_command_status"] = "retrying"
+            self.async_set_updated_data(data)
+            self.config_entry.async_create_background_task(
+                self.hass, self._async_resend_fan(), name=f"{DOMAIN}-fan-retry"
+            )
+        else:
+            data = dict(self.data)
+            data["fan_command_status"] = "unconfirmed"
+            self.async_set_updated_data(data)
+            self._fan_pending = None
+
+    async def _async_resend_fan(self) -> None:
+        """Re-send the pending fan command (idempotent) and await the echo again."""
+        async with self._fan_lock:
+            if self._fan_pending is None or self._fan_frame is None:
+                return
+            try:
+                await self._async_send(self._fan_frame)
+            except Exception as err:
+                _LOGGER.debug("ChefsTemp fan retry send failed: %s", err)
+            self._arm_fan_timer()
+
+    @callback
+    def _fail_fan_command(self) -> None:
+        """Mark the command failed when it could not be sent at all."""
+        self._cancel_fan_timer()
+        self._fan_pending = None
+        data = dict(self.data)
+        data["fan_command_status"] = "failed"
+        self.async_set_updated_data(data)
+
+    async def async_set_fan_target(self, target_c: int) -> None:
+        """Change the fan setpoint; re-apply immediately if the fan is on."""
+        async with self._fan_lock:
+            self.fan_target = int(target_c)
+            data = dict(self.data)
+            data["fan_target"] = self.fan_target
+            self.async_set_updated_data(data)
+            if self.data.get("fan_on"):
+                await self._async_send(
+                    frames.fan_on(self.fan_target, self.fan_strength, self.fan_seconds)
+                )
+
+    async def async_set_high_alarm(self, temp_c: int) -> None:
+        """Set the ambient high alarm."""
+        await self._async_send(frames.high_alarm(int(temp_c)))
+        data = dict(self.data)
+        data["alarm_high"] = int(temp_c)
+        self.async_set_updated_data(data)
+
+    async def async_set_low_alarm(self, temp_c: int) -> None:
+        """Set the ambient low alarm."""
+        await self._async_send(frames.low_alarm(int(temp_c)))
+        data = dict(self.data)
+        data["alarm_low"] = int(temp_c)
+        self.async_set_updated_data(data)
+
+    async def async_shutdown(self) -> None:
+        """Close the BLE and MQTT channels."""
+        self._cancel_fan_timer()
+        if self._probe_diagnostics_timer is not None:
+            self._probe_diagnostics_timer.cancel()
+            self._probe_diagnostics_timer = None
+        if self._ble_resume_handle is not None:
+            self._ble_resume_handle.cancel()
+            self._ble_resume_handle = None
+        if self._ble is not None:
+            await self._ble.async_stop()
+            self._ble = None
+        if self._transport is not None:
+            await self.hass.async_add_executor_job(self._transport.disconnect)
+            self._transport = None
+        await super().async_shutdown()

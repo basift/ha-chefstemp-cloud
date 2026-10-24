@@ -1,0 +1,35 @@
+# ChefsTemp — example automation: lid-open fan recovery (the "fan fix").
+#
+# This is the automation that fixes the thing that bugged me most about the stock
+# behaviour: the Breezo fan is a dumb on/off thermostat, so the moment you open
+# the lid to load food (or spritz, flip, etc.) the grill ambient drops below the
+# fan target and the fan BLASTS at full tilt — oversmoking the food and burning
+# through charcoal for no reason. The device has no notion of "the lid is open".
+#
+# This automation adds that notion in Home Assistant. On a fresh rapid ambient
+# drop near the fan target it turns the fan thermostat OFF, keeps it off through
+# the confirmed natural recovery, and only re-enables it after a full observation
+# window of flat/reversing temperature below target (a real stall, not a lid dip).
+# It fails safe: on stale telemetry, interruption, timeout or any uncertainty the
+# fan is left off and a persistent notification is raised for manual review.
+#
+# How to use it:
+#   1. Install the blueprint at:
+#        config/blueprints/automation/chefstemp/lid_open_recovery_stall.yaml
+#      (it ships in this repo under blueprints/automation/chefstemp/).
+#   2. Add this to your automations (Settings > Automations, or automations.yaml).
+#   3. Replace the three entity IDs with your stand's (the integration names them
+#      after your stand; here they are mllngo / backyard_mllngo).
+#
+# All drop/stall thresholds use the blueprint defaults (calibrated on a 2026-10-09
+# charcoal cook). Tune them per cook/fuel via the blueprint inputs if needed.
+# Keep any OTHER automation off this same fan while this one runs.
+
+- id: chefstemp_lid_open_recovery
+  alias: ChefsTemp lid-open recovery then stall
+  use_blueprint:
+    path: chefstemp/lid_open_recovery_stall.yaml
+    input:
+      temperature_sensor: sensor.mllngo_grill_temperature
+      target_entity: number.mllngo_fan_target
+      fan_entity: fan.mllngo_fan

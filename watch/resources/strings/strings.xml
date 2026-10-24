@@ -1,0 +1,5 @@
+<strings>
+    <string id="AppName">ChefsTemp</string>
+    <string id="HaUrlTitle">Home Assistant URL</string>
+    <string id="HaTokenTitle">Long-lived access token</string>
+</strings>

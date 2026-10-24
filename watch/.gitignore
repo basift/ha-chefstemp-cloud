@@ -1,0 +1,7 @@
+build/
+secrets/
+bin/
+# dist/ holds only the committed, credential-free release .prg. Ignore the
+# build artifacts the compiler drops beside it when building into dist/.
+dist/*
+!dist/*.prg

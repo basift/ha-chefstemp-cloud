@@ -1,0 +1,261 @@
+"""ChefsTemp binary frame protocol (the ``AA55`` frames).
+
+Kept free of Home Assistant, MQTT and Bluetooth imports so it can be exercised
+on its own and reused by any transport — the frames are byte-identical over the
+cloud MQTT channel and over local BLE. See ``docs/PROTOCOL.md`` for how each
+field was established on the wire.
+
+Frame layout (both directions)::
+
+    AA 55 <b2> <h1> <h2> <op> <len> <payload...> <cksum>
+
+* Downlink (app -> device) header is ``53 81 07``. The third byte MUST be ``07``;
+  frames with ``08`` are silently ignored by the device.
+* Uplink (device -> app): ``h2`` (the 5th byte) is ``06`` for telemetry and
+  ``07`` for a command echo. The ``b2`` and ``h1`` bytes are NOT fixed — ``b2`` is
+  ``57`` for most frames but ``58`` for the stand-status frame (op ``10``), and
+  ``h1`` has been observed as both ``A2`` and ``A4`` across sessions. So decoding
+  must NOT pin ``b2``/``h1`` to a constant; integrity is guaranteed by the
+  checksum, and frames are dispatched on ``h2``/``op`` alone. (Pinning ``h1`` to
+  ``A2`` once rejected every frame in an ``A4`` session, freezing the sensors.)
+* ``cksum = (sum(bytes from b2 through the last payload byte) - 1) & 0xFF``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+
+_SYNC = bytes((0xAA, 0x55))
+HEADER_DOWN = bytes((0x53, 0x81, 0x07))  # app -> device (commands)
+
+# Uplink markers, checked as (h1, h2).
+_H1 = 0xA2
+_H2_TELEMETRY = 0x06
+_H2_ECHO = 0x07
+
+# Opcodes.
+OP_STAND = 0x10
+OP_FAN_SET = 0x20
+OP_PROBE = 0x20
+OP_LOW_ALARM = 0x75
+OP_HIGH_ALARM = 0x76
+OP_AMBIENT = 0x71
+OP_FAN_STATE = 0x73
+
+FAN_OFF = 0x00
+FAN_ON = 0x02
+
+# The vendor app sends this fixed dwell in every fan command; it is not a usable short
+# timer (a small value did not auto-stop the fan), so it is kept constant.
+FAN_SECONDS = 0x0DBD
+FAN_STRENGTH = 0x02  # device auto-ramps its own strength; this value is nominal.
+
+
+def _checksum(body: bytes) -> int:
+    """Checksum over the body (b2 through the last payload byte)."""
+    return (sum(body) - 1) & 0xFF
+
+
+def build(op: int, payload: bytes, header: bytes = HEADER_DOWN) -> bytes:
+    """Assemble a complete frame with a valid checksum."""
+    body = bytes(header) + bytes((op, len(payload))) + bytes(payload)
+    return _SYNC + body + bytes((_checksum(body),))
+
+
+def verify(frame: bytes) -> bool:
+    """Whether a frame's trailing checksum matches its body."""
+    if len(frame) < 8 or frame[:2] != _SYNC:
+        return False
+    op_len = frame[6]
+    end = 7 + op_len
+    if len(frame) < end + 1:
+        return False
+    return _checksum(frame[2:end]) == frame[end]
+
+
+# ---------------------------------------------------------------------------
+# Command builders (downlink)
+# ---------------------------------------------------------------------------
+
+
+def fan_command(mode: int, target_c: int, strength: int = FAN_STRENGTH,
+                seconds: int = FAN_SECONDS) -> bytes:
+    """Build a fan command.
+
+    The device treats the fan as a thermostat: with ``mode`` on it runs whenever
+    ``target_c`` is above the grill ambient and idles otherwise, choosing its own
+    strength. ``mode`` off force-stops it regardless of target. One frame carries
+    mode, target and strength together, so callers pass the whole desired state.
+    """
+    payload = (
+        bytes((0x09, mode))
+        + int(seconds).to_bytes(2, "big")
+        + int(target_c).to_bytes(2, "big")
+        + bytes((strength & 0xFF,))
+    )
+    return build(OP_FAN_SET, payload)
+
+
+def fan_on(target_c: int, strength: int = FAN_STRENGTH,
+           seconds: int = FAN_SECONDS) -> bytes:
+    """Enable the fan thermostat at ``target_c``."""
+    return fan_command(FAN_ON, target_c, strength, seconds)
+
+
+def fan_off(target_c: int = 0, strength: int = FAN_STRENGTH,
+            seconds: int = FAN_SECONDS) -> bytes:
+    """Force the fan off."""
+    return fan_command(FAN_OFF, target_c, strength, seconds)
+
+
+def high_alarm(temp_c: int) -> bytes:
+    """Set the ambient high alarm (deg C)."""
+    return build(OP_HIGH_ALARM, int(temp_c).to_bytes(2, "big"))
+
+
+def low_alarm(temp_c: int) -> bytes:
+    """Set the ambient low alarm (deg C)."""
+    return build(OP_LOW_ALARM, int(temp_c).to_bytes(2, "big"))
+
+
+def ping() -> bytes:
+    """A no-op refresh ping (the vendor app sends this periodically)."""
+    return build(OP_STAND, bytes((0x00,)))
+
+
+# ---------------------------------------------------------------------------
+# Telemetry parsing (uplink)
+# ---------------------------------------------------------------------------
+
+
+def _s8(value: int) -> int:
+    """Interpret a byte as a signed 8-bit integer."""
+    return value - 256 if value > 127 else value
+
+
+def split_frames(data: bytes) -> list[bytes]:
+    """Split a payload into frames, length-aware with a resync fallback.
+
+    A single MQTT message (or BLE notification) may concatenate several frames
+    and carry trailing ASCII keepalive text. A frame's own payload can also
+    contain the bytes ``AA 55`` (e.g. a temperature/battery combination), so
+    slicing naively on the sync word would cut a valid frame in two. Instead,
+    when a candidate at a sync word has a valid checksum for its declared length,
+    it is taken by that length and scanning continues after it; otherwise we fall
+    back to the next sync word so a corrupt or unknown frame cannot desync the
+    rest. The malformed slice is still yielded so callers can see and reject it.
+    """
+    frames: list[bytes] = []
+    i = data.find(_SYNC)
+    while i >= 0:
+        if i + 7 <= len(data):
+            end = i + 7 + data[i + 6]  # index of the checksum byte
+            if end < len(data) and _checksum(data[i + 2:end]) == data[end]:
+                frames.append(data[i:end + 1])
+                i = data.find(_SYNC, end + 1)
+                continue
+        j = data.find(_SYNC, i + 2)
+        frames.append(data[i:] if j < 0 else data[i:j])
+        i = j
+    return frames
+
+
+def _decode_one(frame: bytes) -> dict[str, Any] | None:
+    """Decode a single uplink frame into an event dict, or None."""
+    if not verify(frame):
+        return None
+    # Dispatch on h2 (telemetry vs echo) and op only; b2/h1 are not fixed and the
+    # checksum already guarantees integrity.
+    if frame[4] not in (_H2_TELEMETRY, _H2_ECHO):
+        return None
+    op = frame[5]
+    length = frame[6]
+    payload = frame[7:7 + length]
+    if len(payload) < length:
+        return None
+
+    if op == OP_AMBIENT and length >= 2:
+        celsius = int.from_bytes(payload[:2], "big")
+        if celsius in (65278, 65282):  # 0xFEFE/0xFF02: device error / disconnected grill probe
+            return {"type": "ambient_disconnect"}
+        return {"type": "ambient", "celsius": celsius}
+
+    if op == OP_PROBE and frame[4] == _H2_TELEMETRY and length >= 6 and payload[1] == 0x32:
+        # <idx><b1=0x32 const><temp u16 BE /10><battery %><rssi int8>
+        return {
+            "type": "probe",
+            "idx": payload[0],
+            "celsius": int.from_bytes(payload[2:4], "big") / 10,
+            "battery": payload[4],
+            "rssi": _s8(payload[5]),
+        }
+
+    if op == OP_FAN_SET and frame[4] == _H2_ECHO and length >= 7 and payload[0] == 0x09:
+        # Command echo: the device confirms it received and applied a fan command
+        # (op20 <09 mode sec16 target16 strength>). Arrives within ~1s of the
+        # write, so it is a reliable per-command delivery confirmation.
+        return {
+            "type": "fan_echo",
+            "mode": payload[1],
+            "on": payload[1] == FAN_ON,
+            "target": int.from_bytes(payload[4:6], "big"),
+            "strength": payload[6],
+        }
+
+    if op == OP_FAN_STATE and length >= 2:
+        # <moduleMAC 6> 04 01 09 <mode> <strength>
+        return {
+            "type": "fan",
+            "mode": payload[-2],
+            "strength": payload[-1],
+            "on": payload[-2] == FAN_ON,
+        }
+
+    if op == OP_STAND and frame[4] == _H2_TELEMETRY and length >= 1:
+        return {"type": "stand_battery", "percent": payload[0]}
+
+    return None
+
+
+def _probe_candidate_result(frame: bytes) -> tuple[int | None, bool, str]:
+    """Classify a probe candidate without retaining its bytes."""
+    idx = frame[7] if len(frame) > 7 else None
+    if len(frame) < 7:
+        return idx, False, "truncated"
+    length = frame[6]
+    expected_end = 7 + length
+    if length < 6:
+        return idx, False, "payload_length"
+    if len(frame) < expected_end + 1:
+        return idx, False, "truncated"
+    if _checksum(frame[2:expected_end]) != frame[expected_end]:
+        return idx, False, "checksum"
+    if frame[8] != 0x32:
+        return idx, False, "payload_marker"
+    return idx, True, "accepted"
+
+
+def parse(
+    data: bytes,
+    on_probe_candidate: Callable[[int | None, bool, str], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Decode uplink frames; optionally classify probe candidates.
+
+    A candidate has an uplink telemetry header and probe opcode. Its index is
+    unknown if the segment ends before the first payload byte. The callback
+    receives ``(index, accepted, reason)`` and no raw frame bytes.
+    """
+    events: list[dict[str, Any]] = []
+    for frame in split_frames(data):
+        event = _decode_one(frame)
+        if (
+            on_probe_candidate is not None
+            and len(frame) >= 6
+            and frame[4] == _H2_TELEMETRY
+            and frame[5] == OP_PROBE
+        ):
+            on_probe_candidate(*_probe_candidate_result(frame))
+        if event is not None:
+            events.append(event)
+    return events
