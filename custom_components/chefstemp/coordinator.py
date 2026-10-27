@@ -398,6 +398,13 @@ class ChefsTempCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "battery": event["battery"],
                 "rssi": event["rssi"],
             }
+        elif kind == "probe_disconnect":
+            # The probe reported no valid temperature (0xFF.. sentinel). Clear the
+            # reading so the temperature sensor goes unavailable instead of showing
+            # a ~6553 C garbage spike; keep any prior battery/rssi. A later valid
+            # "probe" event restores the reading.
+            existing = data["probes"].get(event["idx"]) or {}
+            data["probes"][event["idx"]] = {**existing, "celsius": None}
         else:
             return False
         return True

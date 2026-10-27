@@ -86,6 +86,22 @@ def test_valid_ambient_not_affected_by_disconnect_code() -> None:
         assert frames.parse(frame) == [{"type": "ambient", "celsius": expected}]
 
 
+@pytest.mark.parametrize("temp_bytes", [b"\xff\xfd", b"\xff\xf3", b"\xff\xbe", b"\xff\xff", b"\xfe\x00"])
+def test_probe_disconnect_sentinel(temp_bytes: bytes) -> None:
+    """An 0xFE../0xFF.. temperature means the probe has no valid reading (observed
+    ~6547-6553 C live); it must surface a disconnect, not a garbage spike."""
+    frame = frames.build(0x20, b"\x00\x32" + temp_bytes + b"\x28\xa7", header=b"\x57\xa2\x06")
+    assert frames.parse(frame) == [{"type": "probe_disconnect", "idx": 0}]
+
+
+def test_valid_high_probe_temperature_not_treated_as_disconnect() -> None:
+    """A real high reading (e.g. 300 C = 0x0BB8) still decodes as a temperature."""
+    frame = frames.build(0x20, b"\x00\x32\x0b\xb8\x28\xa7", header=b"\x57\xa2\x06")
+    assert frames.parse(frame) == [
+        {"type": "probe", "idx": 0, "celsius": 300.0, "battery": 40, "rssi": -89}
+    ]
+
+
 @pytest.mark.parametrize("length", range(14))
 def test_parse_rejects_truncated_probe_frame(length: int) -> None:
     frame = frames.build(0x20, b"\x00\x32\x02\x58\x3c\xaf", header=b"\x57\xa2\x06")

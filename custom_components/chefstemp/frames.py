@@ -183,10 +183,20 @@ def _decode_one(frame: bytes) -> dict[str, Any] | None:
 
     if op == OP_PROBE and frame[4] == _H2_TELEMETRY and length >= 6 and payload[1] == 0x32:
         # <idx><b1=0x32 const><temp u16 BE /10><battery %><rssi int8>
+        raw = int.from_bytes(payload[2:4], "big")
+        # When the meat probe has no valid reading (not seated / out of range /
+        # link glitch), the device fills the temperature field with an 0xFF.. code
+        # (observed 0xFFBE..0xFFFD, i.e. a nonsensical ~6547-6553 C once /10) — the
+        # probe analogue of the ambient 0xFEFE/0xFF02 codes above. A real food/grill
+        # probe never reads this high, so treat any >= 0xFE00 as "no reading" and
+        # surface a disconnect instead of a garbage spike. (This previously decoded
+        # to ~6553 C and left the sensor stuck/garbled until valid frames resumed.)
+        if raw >= 0xFE00:
+            return {"type": "probe_disconnect", "idx": payload[0]}
         return {
             "type": "probe",
             "idx": payload[0],
-            "celsius": int.from_bytes(payload[2:4], "big") / 10,
+            "celsius": raw / 10,
             "battery": payload[4],
             "rssi": _s8(payload[5]),
         }
